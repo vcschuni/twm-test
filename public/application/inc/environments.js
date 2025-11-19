@@ -62,7 +62,8 @@ function isValidTwmDomain() {
 		"localhost",
 		"127.0.0.1",
 		"th.gov.bc.ca",
-		"drivebc.ca"
+		"drivebc.ca",
+		"gov.bc.ca"
 	];
 	
 	// Test if current hostname falls with domain list
