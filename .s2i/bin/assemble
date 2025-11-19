@@ -1,11 +1,10 @@
 #!/bin/bash
 set -e
 
+# Run composer if present
 if [ -f composer.json ]; then
     echo "Running composer install..."
     composer install --no-dev --optimize-autoloader
 fi
 
-echo "Copying application source..."
-mkdir -p /opt/app-root/src
-cp -Rf . /opt/app-root/src
+# No manual mkdir, just let the S2I copy files
