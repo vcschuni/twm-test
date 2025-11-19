@@ -1,10 +1,10 @@
 #!/bin/bash
 set -e
 
-# Run composer if present
+# Only run composer if it exists
 if [ -f composer.json ]; then
     echo "Running composer install..."
     composer install --no-dev --optimize-autoloader
 fi
 
-# No manual mkdir, just let the S2I copy files
+# Do NOT manually mkdir or copy files; S2I handles that automatically
