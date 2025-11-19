@@ -1,3 +1,0 @@
-#!/bin/bash
-# Copy all files from public/ to the app root
-cp -R /tmp/src/public/* $APP_ROOT
