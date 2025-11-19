@@ -1,0 +1,10 @@
+#!/bin/bash
+set -e
+
+if [ -f composer.json ]; then
+    echo "Running composer install..."
+    composer install --no-dev --optimize-autoloader
+fi
+
+echo "Copying application source..."
+cp -Rf . /opt/app-root/src
