@@ -1,0 +1,1293 @@
+class CRTreporter {
+	
+	/**
+	 * Function: constructor
+	 * @param () none
+	 * @returns () nothing
+	 * Function that initializes the class
+	 */
+	constructor() {
+		this.name = "CRTreporter";
+		this.version = 1.0;
+		this.author = "Volker Schunicht, modified by Peter Spry";
+		this.pcfg = getPluginConfig(this.name);
+		this.tabName = (this.pcfg.tabName) ? this.pcfg.tabName : "CaRT Reporter";
+		this.tabContentFile = "application/plugins/CRTreporter/tab-content.html";
+		this.filterLayer;
+		this.chartLayerName = "CRTData"; // Layer name in app-config.js
+		this.maxFeatures = "1000000"; // for CaRT massive left join
+		this.deferFilterApplications = true;
+		this.busy = false;  // prevent duplicate calls
+		this.tabNav; // jQuery element
+		this.tabContent // jQuery element
+		this.addPlugin();
+	}
+
+	/**
+	* Function: letsGetFiscal
+	* @param integer Number of years to offset
+	* @returns string 
+	* Function get a Fiscal Year in the form YYYY/YYYY
+	*/
+	letsGetFiscal(offset) {
+		var fiscalyear = "";
+		var today = new Date();
+		if ((today.getMonth() + 1) <= 3) {
+			fiscalyear = (today.getFullYear() - 1 + offset) + "/" + (today.getFullYear() + offset);
+		} else {
+			fiscalyear = (today.getFullYear() + offset) + "/" + (today.getFullYear() + 1 + offset);
+		}
+		return fiscalyear
+	}	
+	/**
+	* Function: saveChart
+	* @param nothing
+	* @returns nothing
+	* Function to save the chart canvas as an image
+	*/
+	saveChart() {
+		var srcCanvas = document.getElementById("chart");
+		
+		//create a dummy CANVAS		
+		var destinationCanvas = document.createElement("canvas");
+		destinationCanvas.width = srcCanvas.width;
+		destinationCanvas.height = srcCanvas.height;		
+		var destCtx = destinationCanvas.getContext('2d');
+		
+		//create a rectangle with the desired color
+		destCtx.fillStyle = "#FFFFFF";
+		destCtx.fillRect(0,0,srcCanvas.width,srcCanvas.height);
+		
+		//draw the original canvas onto the destination canvas
+		destCtx.drawImage(srcCanvas, 0, 0);
+			
+		var link = document.getElementById('link');
+		link.setAttribute('download', $("#mfw-ptt")[0].children[0].innerText+'.png');
+		link.setAttribute('href', destinationCanvas.toDataURL("image/png").replace("image/png", "image/octet-stream"));
+		link.click();		
+	}
+	
+	/**
+	* Function: printChart
+	* @param nothing
+	* @returns nothing
+	* Function to print the chart canvas
+	*/
+	printChart() {
+		var chartCanvas = document.getElementById("chart");
+		var width = screen.width/2;
+		var height = screen.height/2;
+		var printThis = chartCanvas.toDataURL("image/png");
+		var html = `<html><head><title>${$("#mfw-ptt")[0].children[0].innerText}</title></head><body><img src=${printThis}></body></html>`;
+		var printWin = window.open('','Print-Preview',`height=${height},width=${width}`);
+		printWin.document.open();
+		printWin.document.write(html);
+		printWin.document.addEventListener('load', function() {
+			printWin.focus();
+			printWin.print();
+			printWin.document.close();
+			printWin.close();            
+		}, true);
+		printWin.document.close();
+	}
+	
+	/**
+	* Function: prettyMoney
+	* @param number
+	* @returns string
+	* Function to format number into currency, with values over one million indicated with an "M"
+	*/
+	prettyMoney(dollars) {
+		var prettyValue = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(dollars);		
+		if (dollars > 999999.99) {
+			var millions = Math.round(dollars/1000000);
+			prettyValue = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(millions);
+			prettyValue = prettyValue.slice(0, -3)+"M"; // remove decimal dollars
+		} else {
+			prettyValue = prettyValue.slice(0, -3);
+		}
+		return prettyValue;
+	}
+		
+
+	/** 
+	* Function: exportToCSV
+	* @param nothing
+	* @returns nothing
+	* Function to export CaRT data to CSV format
+	*/
+	exportToCSV() {				
+		// Use the Project Locations layer as a starting place
+		var chartLayer = app.map.getLayers().getArray().find(layer => layer.get('name') == app.plugins.CRTreporter.chartLayerName);
+		
+		// Create CQL Filter
+		var friendlyFilter="";
+		var aFilter = chartLayer.getSource().getParams().CQL_FILTER;
+		if (aFilter) {
+			aFilter = "CQL_FILTER="+encodeURIComponent(aFilter);
+		} else {
+			aFilter = "";
+		}
+		
+		// But actually query the non-spatial layer for the CSV export
+		var typeName = "crt:CRT_PROJECT_MULTI_V"; 
+		var downloadUrl = chartLayer.getSource().getUrl()+"?service=wfs&request=getFeature&version=2.0.0&count="+app.plugins.CRTreporter.maxFeatures+"&typeNames="+typeName+"&outputformat=CSV&"+aFilter;
+
+		// Download the file
+		downloadFile(downloadUrl);				
+	}
+		
+	/**
+	 * Function: addFilterableLayersToSelectControl
+	 * @param () none
+	 * @returns () nothing
+	 * Function to add layers configured to filterable to the layer filter select control
+	 */
+	addFilterableLayersToSelectControl() {
+		// Empty the layer select control
+		$("#cr-filter-layer-select").empty();
+								
+		// Loop through all of the map layers looking for ones that are configured for filtering
+		$.each(app.map.getLayers().getArray(), function(index, layer) {
+			// Get the layer ID
+			var layerId = ol.util.getUid(layer);
+			
+			// Determine if its configured for filtering
+			var addAsFilterLayer = false;
+			var fields = layer.get("fields");
+			if (fields) {
+				$.each(fields, function(index2, field) {
+					if (field.filters) {
+						if (field.filters.length > 0) addAsFilterLayer = true;
+					}
+				});
+			}
+
+			// Add as filter layer if configured
+			if (addAsFilterLayer === true) {
+				$("#cr-filter-layer-select").prepend(new Option(layer.get("title"), layerId));
+			}
+		});
+		
+		// Register select change handler
+		$("#cr-filter-layer-select").on("change", function(e){
+			// Defer filter applications
+			app.plugins.CRTreporter.deferFilterApplications = true;
+			
+			// Build filter controls
+			var selectedLayerId = $("#cr-filter-layer-select option:selected").val();
+			app.plugins.CRTreporter.addFilterControls(selectedLayerId);  
+
+			// New Reset button addFilterableLayersToSelectControl()
+			var resetBtn = $("<div class='text-center'><button class='btn btn-sm btn-block btn-success mt-3' type='button'>Reset Filters</button></div>");
+			resetBtn.click(function(){
+				app.plugins.CRTreporter.addFilterableLayersToSelectControl();
+			});
+			$("#cr-filter-controls").append(resetBtn);
+			
+			// Put the next two buttons side-by-side
+			var $newDiv = $("<div/>")   // creates a div element
+				 .addClass("container-fluid")
+				 .addClass("text-center");   // add a class
+
+			$("#cr-filter-controls").append($newDiv);
+			var $newRowDiv = $("<div/>")   // creates a div element
+				 .addClass("row");   // add a class
+			$newDiv.append($newRowDiv);
+			$newDiv = $("<div/>")   // creates a div element
+				 .addClass("col-sm-6");   // add a class
+			$newRowDiv.append($newDiv);
+			
+			// Export button setup
+			var exportBtn =  $("<button class='btn btn-sm btn-block btn-success mt-3' type='button'>Export to CSV</button>");
+			exportBtn.click(function(){
+				app.plugins.CRTreporter.exportToCSV();
+			});
+			$newDiv.append(exportBtn);
+			
+			$newDiv = $("<div/>")   // creates a div element
+				 .addClass("col-sm-6");   // add a class
+			$newRowDiv.append($newDiv);
+
+			// Chart setup
+			var chartBtn =  $("<button class='btn btn-sm btn-block btn-success mt-3' type='button'>Open Chart</button>");
+			chartBtn.click(function(){
+				app.plugins.CRTreporter.fetchDataForChart();
+			});
+			$newDiv.append(chartBtn); // was $("#cr-filter-controls")
+			
+			if ($('#chartType').length) {
+				// don't add it again if this is a reset
+			} else {
+
+				// charting options
+				$newDiv = $("<div/>")   // creates a div element
+					 .addClass("col-sm-3");   // add a class
+
+				var dropdown = $("<select id='chartType' class='form-select'>");
+				dropdown.id = 'chartType';
+				dropdown.append('<option value="pie">pie</option>');
+				dropdown.append('<option value="bar">bar</option>');
+				dropdown.append('<option value="radar">radar</option>');
+				dropdown.append('<option value="doughnut">doughnut</option>');
+				dropdown.append('<option value="line">line</option>');
+				dropdown.change(function() {
+					var chartConfig = app.plugins.CRTreporter.chart.config;
+					chartConfig.type = this.value;
+					chartConfig.options.scales = {};
+					if (app.plugins.CRTreporter.chart) { // there can be only one
+						app.plugins.CRTreporter.chart.destroy();
+					}
+					app.plugins.CRTreporter.chart = new Chart('chart',chartConfig);
+					window.dispatchEvent(new Event('resize'));
+
+				});
+				$newDiv.append(dropdown);
+				$(".cr-chartControl").append($newDiv);
+
+				$newDiv = $("<div/>")   // creates a div element
+				 .addClass("col-sm-5");   // add a class
+			
+				dropdown = $("<select id='chartData' class='chartData form-select'>");
+				dropdown.id = 'chartData';
+				dropdown.append('<option value="project">Allocation by Project</option>');
+				dropdown.append('<option value="hwy">Allocation by Highway</option>');
+				dropdown.append('<option value="serviceArea">Allocation by Service Area</option>');
+				dropdown.append('<option value="district">Allocation by District</option>');
+				dropdown.append('<option value="electDist">Allocation by Electoral District</option>');
+				dropdown.append('<option value="econRegion">Allocation by Economic Region</option>');
+				dropdown.change(function() {					
+					// clear project info div					
+					app.plugins.CRTIdentify2Popup.clear();
+					$(".cr-infoDiv-content").hide();
+					if ($(".cr-chartDiv").hasClass("col-sm-6") ) $(".cr-chartDiv").removeClass("col-sm-6");
+					
+					var extraLabels = [];
+					if (this.value == "project") extraLabels = $("#cr-chartSpace").data("project").projectNames;
+					app.plugins.CRTreporter.makeChart($("#mfw-ptt .fw-title").html(),app.plugins.CRTreporter.chart.config.type, app.plugins.CRTreporter.chart.config.options.plugins.title.text, $("#cr-chartSpace").data(this.value).labels,  $("#cr-chartSpace").data(this.value).data, extraLabels, $("#cr-chartSpace").data(this.value).projectNums);	
+					window.dispatchEvent(new Event('resize'));
+
+				});
+				$newDiv.append(dropdown);
+				$(".cr-chartControl").append($newDiv);
+
+				// Print / download chart
+				$newDiv = $("<div/>")   // creates a div element
+				 .addClass("col-sm-2");   // add a class
+				var printBtn = $("<button class='btn btn-outline-secondary btn-sm' type='button'>Print</button>");
+				printBtn.click(function(){
+					app.plugins.CRTreporter.printChart();
+				});
+				$newDiv.append(printBtn);
+				$(".cr-chartControl").append($newDiv);
+
+				// Save chart
+				$newDiv = $("<div/>")   // creates a div element
+				 .addClass("col-sm-2");   // add a class
+				var saveBtn = $("<button class='btn btn-outline-secondary btn-sm' type='button'>Save</button>");
+				saveBtn.click(function(){
+					app.plugins.CRTreporter.saveChart();
+				});
+				$newDiv.append(saveBtn);
+				$(".cr-chartControl").append($newDiv);
+
+			}
+						
+		});
+
+		// Only show layer select control if more than one layer
+		if ($("#cr-filter-layer-select option").length > 1) $("#cr-filter-layer-select-container").show();
+		
+		// Set selection to first option and trigger change
+		$("#cr-filter-layer-select").val($("#cr-filter-layer-select option:first").val());
+		$("#cr-filter-layer-select").trigger("change");		
+
+	}
+
+	/**
+	 * Function: makeChart
+	 * @param string, string, string, string, JSON array, JSON array, JSON array, JSON array
+	 * @returns () nothing
+	 * Function that displays graph of data in passed array
+	 */	
+	 
+	makeChart(windowTitle, type, title, labels, data, projectNames, projectNumbers ) {
+			
+		const minSize = 300;
+		var chartLabels = labels;
+		var chartData = data;		
+		var chartColours = [];
+		data.forEach(function(row,i) {
+			chartColours.push("#"+Math.floor(Math.random()*16777215).toString(16)); // random colour assigment
+		}); 
+		if (app.plugins.CRTreporter.chart) { // there can be only one
+			app.plugins.CRTreporter.chart.destroy();
+		}
+		app.plugins.CRTreporter.chart = new Chart('chart', {
+		type: type,
+		plugins: [ChartDataLabels], 			
+		options: {
+			responsive: true,
+			maintainAspectRatio: false,			
+			onClick(e) {
+			  const activePoints = app.plugins.CRTreporter.chart.getElementsAtEventForMode(e, 'nearest', {
+				intersect: true
+			  }, false)
+			  const [{ index }] = activePoints;
+			  if ((projectNumbers.length >= index + 1) && (projectNumbers[index].length > 1)) {
+				  app.plugins.CRTreporter.identifyProject(projectNumbers[index]);
+				}
+			
+			},	
+			layout: {
+				padding: {
+					bottom: 20
+				}
+			},
+			plugins:{	
+				legend: {
+					display: false
+				},
+				title: {
+					display: true,
+					text: title
+				},
+				subtitle: {
+					display: true,
+					text: ''
+				},
+				tooltip: {
+					callbacks: {
+						label: function(context) {
+							var label = context.label;
+							if ($("#mfw-ptt").find(".chartData").val() == 'project') {		
+								label = projectNames[context.dataIndex] + ' '+app.plugins.CRTreporter.prettyMoney(context.dataset.data[context.dataIndex]);
+							} else {
+								label = label + " " + app.plugins.CRTreporter.prettyMoney(context.dataset.data[context.dataIndex]);
+							}	
+							return label;
+						}
+					}
+				},		
+				datalabels: {
+					anchor: 'end',
+					align: 'end',
+					offset: 2,
+					display: 'auto',
+					formatter: function(value, context) {
+					  return app.plugins.CRTreporter.prettyMoney(value);
+					}
+				}
+					
+			},
+		},
+		data: {
+		  labels: chartLabels,
+		  datasets: [
+			{
+			  data: chartData,
+			  backgroundColor: chartColours // ['red', 'orange', 'yellow', 'green', 'blue']
+			}
+		  ]
+		}
+		});
+	}
+	
+	/** 
+	* Function: sortDataMap
+	* @param(string, Map) category of Data, key/value of labels and values
+	* @returns nothing
+	* Function to sort map by value by ASC and store into chartDiv for later
+	*/
+	sortDataMap(dataCategory, dataMap) {
+		var percentTolerance = 0.05;
+		var labels = Array.from(dataMap.keys()); 
+		var data = [...dataMap.values()];
+		var toSort = [];
+		labels.forEach(function(item,index) {
+			toSort.push([item,data[index]]);
+		});
+		toSort.sort(function (a, b) {
+		  return b[1][0] - a[1][0];
+		});			
+		var chartLabels = toSort.map(tuple => tuple[0]);
+		var chartData = toSort.map(tuple => tuple[1][0]);
+		var projectNums = toSort.map(tuple => tuple[1][1]);
+		
+		var dataSum = 0;
+		chartData.forEach(function(item,index) {
+			if (typeof item == "number") {
+				dataSum += item;
+			}
+		});
+		var unAccounted = $("#cr-chartSpace").data("project").sum - dataSum;
+		// project total not partitioned into existing categories, so add unknown category
+		if (unAccounted > ($("#cr-chartSpace").data("project").sum * percentTolerance)) { 
+			chartLabels.push("Prov and Regional Initiatives");
+			chartData.push(unAccounted);
+		}
+		
+		$("#cr-chartSpace").data(dataCategory, {"labels": chartLabels, "data": chartData, "sum": dataSum, "projectNums": projectNums});
+	}
+	
+	/** 
+	* Function: identifyProject
+	* @param(string) project number
+	* returns nothing
+	* Function to popup project details
+	*/
+	identifyProject(projNums) {
+		// might take a bit for lots of projects
+		var spinner = new Spinner(app.spinnerOptionsMedium).spin($("#mfw-ptt")[0]);
+		
+		// NOTE using the non-spatial CRT_PROJECT_MULTI_V as not all projects have segments
+		var chartLayer = app.map.getLayers().getArray().find(layer => layer.get('name') == app.plugins.CRTreporter.chartLayerName);
+
+		var aFilter = "PROJECT_NUMBER IN ("+projNums+")";
+		aFilter = "CQL_FILTER="+encodeURIComponent(aFilter);
+		var typeName = "crt:CRT_PROJECT_MULTI_V";
+		var gfiUrl = chartLayer.getSource().getUrl()+"?service=wfs&request=getFeature&version=2.0.0&count=100000&typeNames="+typeName+"&outputformat=JSON&"+aFilter;
+		
+		// Issue the request
+		$.ajax({
+			type: "GET",
+			url: gfiUrl,
+			dataType: "json",
+			timeout: 5000,
+			xhrFields: {
+				withCredentials: true
+			}
+		})		
+		// Handle the response
+		.done(function(response) {
+			// convert bazillions of features into a map keyed on PROJECT_NUMBER
+			var result = new Map(response.features.map(i => [i.properties.PROJECT_NUMBER, i]));
+			app.plugins.CRTIdentify2Popup.clear();
+			var features = [];
+			result.forEach(function(item){ // Add arbitrary geometry since CRT_PROJECT_MULTI_V is non-spatial
+				item.bbox = [48.25,-139.04,60.01,-114.08];
+				item.geometry_name = "GEOMETRY";
+				item.geometry = {'type': 'Polygon', 'coordinates':[[48.25,-139.04],[48.25,-114.08],[60.01,-114.08],[60.01,-139.04],[48.25,-139.04]]}
+				features.push(item)
+			});
+			var features = app.plugins.CRTIdentify2Popup.aggregateFeatures(features);
+			if (features.length > 0) app.plugins.CRTIdentify2Popup.resultsAggregator(chartLayer, features);
+			// Add paging div if required	
+			if (app.plugins.CRTIdentify2Popup.featureStore.length > 1) {
+				var pager = $("<div onselectstart='return false'></div>");
+				pager.attr("id", "ci2p-paging");
+				pager.attr("currentFeatureStoreId", 0);
+				pager.attr("maxFeatureStoreId", (app.plugins.CRTIdentify2Popup.featureStore.length - 1));
+				pager.append("<span class='oi oi-chevron-left ci2p-page-left' title='Previous' onclick='app.plugins.CRTIdentify2Popup.switchPage(-1)'></span>");
+				pager.append("<span id='ci2p-paging-text'>1 of " + app.plugins.CRTIdentify2Popup.featureStore.length + "</span>");
+				pager.append("<span class='oi oi-chevron-right ci2p-page-right' title='Next' onclick='app.plugins.CRTIdentify2Popup.switchPage(1)'></span>");
+				app.plugins.CRTIdentify2Popup.popupContent.append(pager);
+			}	
+			
+			spinner.stop();		
+						
+			$(".cr-infoDiv-closer").click(function(){ // give chart the full window
+				app.plugins.CRTIdentify2Popup.clear();
+				$(".cr-infoDiv-content").hide()
+				if ($(".cr-chartDiv").hasClass("col-sm-6") ) $(".cr-chartDiv").removeClass("col-sm-6");
+			});
+
+			// give the infoDiv some room and display it
+			if (!$(".cr-chartDiv").hasClass("col-sm-6") ) $(".cr-chartDiv").addClass("col-sm-6");		
+			$("#mfw-ptt").find(".cr-infoDiv-content").html(app.plugins.CRTIdentify2Popup.popupContent);
+			$(".cr-infoDiv-closer").css({ top: '-10px' });
+			$(".cr-infoDiv-content").show()
+		})		
+		.fail(function(jqxhr, settings, exception) {
+			spinner.stop();
+			logger("ERROR", "CRTreporter: "+typeName+" - " + exception);
+		});
+	}
+	
+	/**
+	 * Function: fetchDataForChart
+	 * @param () none
+	 * @returns () nothing
+	 * Function to get layer data based on the defined filter
+	 */
+	fetchDataForChart() {
+		// bail if data calculations are in progress
+		if (app.plugins.CRTreporter.busy) return;
+		app.plugins.CRTreporter.busy = true;
+		
+		// Let user know this might take a moment
+		var spinner = new Spinner(app.spinnerOptionsMedium).spin($(app.plugins.CRTreporter.tabContent)[0]);
+		
+		// Get layer in question
+		var chartLayer = app.map.getLayers().getArray().find(layer => layer.get('name') == app.plugins.CRTreporter.chartLayerName);
+		
+		// Create CQL Filter
+		var friendlyFilter="";
+		var aFilter = chartLayer.getSource().getParams().CQL_FILTER;
+		if (aFilter) {
+			friendlyFilter = aFilter;
+			aFilter = "CQL_FILTER="+encodeURIComponent(aFilter);
+		} else {
+			aFilter = "";
+			friendlyFilter = "no filter";
+		}
+		
+		// Request Data based on current filter criteria
+		var typeName = "crt:CRT_PROJECT_MULTI_V"; //chartLayer.getSource().getParams().LAYERS;
+		var contentUrl = chartLayer.getSource().getUrl()+"?service=wfs&request=getFeature&version=2.0.0&count="+app.plugins.CRTreporter.maxFeatures+"&typeNames="+typeName+"&outputformat=JSON&"+aFilter;
+		
+		// download into D3 array		
+		d3.json(contentUrl)
+			.then(function(geoJson_data) {				
+				// Group by Project and get the "Allocation" for each unique project
+				var byProject = d3.flatGroup(geoJson_data.features, d => d.properties.PROJECT_ID, d => d.properties.PROJECT_NUMBER, d => d.properties.PROJECT_NAME, d => d.properties.FIN_TARGET_ID, d => d.properties.FUNDING_TYPE_DESC, d => d.properties.FIN_TARGET_AMOUNT);
+						
+				// Prepare chart labels and data for chart 
+				var chartLabels = [];
+				var extraLabels = [];
+				var projectNums = [];
+				var chartData = [];
+				var unsorted = [];
+				var total = 0;
+				var lastProjNum = "";
+				var lastProjIndex = 0;
+				var projAlloc = new Map(); // project number and allocation
+				var projName = new Map();
+
+				// ===== ALLOCATION CALCULATION =======					
+				byProject.forEach(function(item,index){
+					var key = item[1]; // PROJECT_NUMBER
+					var value = item[5]; //FIN_TARGET_AMOUNT
+					if ((item[4] == 'Allocation') || (item[4] == 'Bridge Uplift')) {
+						if (projAlloc.get(key)) {
+							// update entry
+							var oldValue = projAlloc.get(key);
+							projAlloc.set(key, oldValue + value);
+						} else {
+							// new entry
+							projAlloc.set(key,value);
+							projName.set(key,item[2]);
+						}
+					} else { 
+						projName.set(key,item[2]);
+						if (!(projAlloc.get(key))) {
+							// project has nothing allocated
+							projAlloc.set(key,0);
+						}
+					}
+				});
+				
+				// sort for better display
+				projAlloc.forEach((value, key) => {
+					var value = projAlloc.get(key);
+					total += value;
+					unsorted.push([key,value,projName.get(key)]);
+				});				
+						
+				unsorted.sort(function (a, b) {
+				  return b[1] - a[1];
+				});
+
+ 				unsorted.forEach(function(item){
+					chartLabels.push(item[0]);
+					chartData.push(item[1]);
+					extraLabels.push(item[2]);
+					projectNums.push("'"+item[0]+"'");
+				});
+				
+				$("#cr-chartSpace").data("project", {"labels": chartLabels, "data": chartData, "sum": total, "projectNums": projectNums, "projectNames": extraLabels});
+				var prettyValue = app.plugins.CRTreporter.prettyMoney(total);
+				
+				// Group by Project and Ratios to get value for each ratio area
+				var byProjectByRatio = d3.flatGroup(geoJson_data.features, d => d.properties.PROJECT_NUMBER, d => d.properties.RATIO_ID);
+				
+				var serviceArea = new Map();
+				var district = new Map();
+				var hwy = new Map()
+				var econRegion = new Map();
+				var electDist = new Map();
+
+				var serviceAreaNums = new Map();
+				var districtNums = new Map();
+				var hwyNums = new Map();
+				var econRegionNums = new Map();
+				var electDistNums = new Map();
+				
+				try {
+					byProjectByRatio.forEach(function(item){
+						// sum value by ratio into each bin
+						// track unique project numbers to find projects without a specific ratio
+						var value = 0;
+						if (projAlloc.get(item[0])) {
+							value = projAlloc.get(item[0]);
+						}
+
+						switch (item[2][0].properties.RATIO_RECORD_TYPE) {
+							case 'Service Area':
+							serviceAreaNums.set("'"+item[0]+"'","good");
+							if (serviceArea.get(item[2][0].properties.SERVICE_AREA_NAME)) { // update
+								var newValue = serviceArea.get(item[2][0].properties.SERVICE_AREA_NAME)[0] + item[2][0].properties.RATIO * value;
+								var newProjList =  serviceArea.get(item[2][0].properties.SERVICE_AREA_NAME)[1] + ",'" + item[0] + "'";								
+								serviceArea.set(item[2][0].properties.SERVICE_AREA_NAME,[newValue,newProjList]);
+							} else { // insert
+								serviceArea.set(item[2][0].properties.SERVICE_AREA_NAME, [item[2][0].properties.RATIO * value,"'"+item[0]+"'"]);
+							}	
+							break;
+							case 'District':
+							districtNums.set("'"+item[0]+"'","good");
+							if (district.get(item[2][0].properties.DISTRICT_NAME)) { // update
+								var newValue = district.get(item[2][0].properties.DISTRICT_NAME)[0] + item[2][0].properties.RATIO * value;
+								var newProjList =  district.get(item[2][0].properties.DISTRICT_NAME)[1] + ",'" + item[0] + "'";								
+								district.set(item[2][0].properties.DISTRICT_NAME,[newValue,newProjList]);
+							} else { // insert
+								district.set(item[2][0].properties.DISTRICT_NAME, [item[2][0].properties.RATIO * value,"'"+item[0]+"'"]);
+							}	
+							break;
+							case 'Highway':
+							hwyNums.set("'"+item[0]+"'","good");
+							if (hwy.get(item[2][0].properties.RATIO_RECORD_DESC)) { // update
+								var newValue = hwy.get(item[2][0].properties.RATIO_RECORD_DESC)[0]+item[2][0].properties.RATIO * value;
+								var newProjList =  hwy.get(item[2][0].properties.RATIO_RECORD_DESC)[1] + ",'" + item[0] + "'";
+								hwy.set(item[2][0].properties.RATIO_RECORD_DESC,[newValue,newProjList]);
+							} else { // insert
+								hwy.set(item[2][0].properties.RATIO_RECORD_DESC, [item[2][0].properties.RATIO * value,"'"+item[0]+"'"]);
+							}	
+							break;
+							case 'Economic Region':
+							econRegionNums.set("'"+item[0]+"'","good");
+							if (econRegion.get(item[2][0].properties.RATIO_RECORD_DESC)) { // update
+								var newValue = econRegion.get(item[2][0].properties.RATIO_RECORD_DESC)[0]+item[2][0].properties.RATIO * value;
+								var newProjList =  econRegion.get(item[2][0].properties.RATIO_RECORD_DESC)[1] + ",'" + item[0] + "'";
+								econRegion.set(item[2][0].properties.RATIO_RECORD_DESC,[newValue,newProjList]);
+							} else { // insert
+								econRegion.set(item[2][0].properties.RATIO_RECORD_DESC, [item[2][0].properties.RATIO * value,"'"+item[0]+"'"]);
+							}	
+							break;
+							case 'Electoral District':
+							electDistNums.set("'"+item[0]+"'","good");
+							if (electDist.get(item[2][0].properties.RATIO_RECORD_DESC)) { // update
+								var newValue = electDist.get(item[2][0].properties.RATIO_RECORD_DESC)[0]+item[2][0].properties.RATIO * value;
+								var newProjList =  electDist.get(item[2][0].properties.RATIO_RECORD_DESC)[1] + ",'" + item[0] + "'";
+								electDist.set(item[2][0].properties.RATIO_RECORD_DESC,[newValue,newProjList]);
+							} else { // insert
+								electDist.set(item[2][0].properties.RATIO_RECORD_DESC, [item[2][0].properties.RATIO * value,"'"+item[0]+"'"]);
+							}	
+							break;
+						}
+					});
+				} catch(error) {
+					logger("ERROR", app.plugins.CRTreporter.name + ": Error processing crt:CRT_PROJECT_MULTI_V data " + error);
+				}
+			
+				// unpack maps into data arrays and attach to cr-chartSpace div for easy retrieval	
+				app.plugins.CRTreporter.sortDataMap("serviceArea",serviceArea);		
+				app.plugins.CRTreporter.sortDataMap("district",district);		
+				app.plugins.CRTreporter.sortDataMap("hwy",hwy);		
+				app.plugins.CRTreporter.sortDataMap("electDist",electDist);		
+				app.plugins.CRTreporter.sortDataMap("econRegion",econRegion);		
+							
+				// figure out which projects do NOT have this type of ratio
+				var badServiceAreaNums = "";
+				var badDistrictNums = "";
+				var badHwyNums = "";
+				var badEconRegionNums = "";
+				var badElectDistNums = "";
+				projectNums.forEach(function(item) { // if it isn't in a ratio, its BAD "no ratio"
+					if (!(serviceAreaNums.has(item))) {badServiceAreaNums += item + ","}
+					if (!(districtNums.has(item))) {badDistrictNums += item + ","}
+					if (!(hwyNums.has(item))) {badHwyNums += item + ","}
+					if (!(econRegionNums.has(item))) {badEconRegionNums += item + ","}
+					if (!(electDistNums.has(item))) {badElectDistNums += item + ",";}
+				});
+				// add list of BAD projects to the chart data
+				if (badServiceAreaNums.length > 1) { $("#cr-chartSpace").data("serviceArea").projectNums.push(badServiceAreaNums.slice(0, -1)) };
+				if (badDistrictNums.length > 1) { $("#cr-chartSpace").data("district").projectNums.push(badDistrictNums.slice(0, -1)) };
+				if (badHwyNums.length > 1) { $("#cr-chartSpace").data("hwy").projectNums.push(badHwyNums.slice(0, -1)) };
+				if (badEconRegionNums.length > 1) { $("#cr-chartSpace").data("econRegion").projectNums.push(badEconRegionNums.slice(0, -1)) };
+				if (badElectDistNums.length > 1) { $("#cr-chartSpace").data("electDist").projectNums.push(badElectDistNums.slice(0, -1)) };				
+								
+				// reuse chart settings if they exist
+				var chartData = "project"
+				if ($("#mfw-ptt").find(".chartData").length) {
+					chartData = $("#mfw-ptt").find(".chartData").val();
+				}
+				var chartType = "pie";	
+				if (app.plugins.CRTreporter.chart) {
+					chartType = app.plugins.CRTreporter.chart.config.type;					
+				}
+				
+				var chartTitle = $("#cr-chartSpace").data("project").labels.length + " Projects " + prettyValue;
+				if ($("#cr-chartSpace").data("project").labels.length == 1) {	
+					chartTitle = "One Project "+ prettyValue;
+				} 
+				
+				var content = $(".cr-chartSpace").clone(true);
+				content.removeClass('cr-chartSpace');
+				content.find(".chartData").val(chartData);
+				$("#chartType option[value='"+chartType+"']").prop('selected', true);
+				content.show();
+				
+				var newCanvas = $('<canvas id="chart"></canvas>');
+				content.find(".cr-chartDiv").append(newCanvas);
+				
+				// close pop-up to avoid confusing the user
+				closePopup();
+						
+				// open the floatinag window
+				app.plugins.MultiFloatingWindow.open("ptt",chartTitle,  content, 550, 450);
+				$("#chartType option[value='"+chartType+"']").prop('selected', true);
+				
+				// make chart responsive to floating window resizing
+				$(window).resize(function() {
+					var newHeight = $("#mfw-ptt").height()-50;
+					if (newHeight > 300) $("#chart").height($("#mfw-ptt").height()-125);
+				});
+
+				let resizeObserver = new ResizeObserver(() => {
+					window.dispatchEvent(new Event('resize'));
+				});			
+				resizeObserver.observe($("#mfw-ptt")[0]);	
+				
+				// give the chart the whole window width
+				app.plugins.CRTIdentify2Popup.clear();
+				$(".cr-infoDiv-content").hide()
+				if ($(".cr-chartDiv").hasClass("col-sm-6") ) $(".cr-chartDiv").removeClass("col-sm-6");				
+								
+				if ($("#cr-chartSpace").data("project").labels.length > 0) {
+					spinner.stop();
+					app.plugins.CRTreporter.makeChart(chartTitle, chartType, friendlyFilter, $("#cr-chartSpace").data(chartData).labels,  $("#cr-chartSpace").data(chartData).data, extraLabels, $("#cr-chartSpace").data(chartData).projectNums);	
+				} else {
+					spinner.stop();
+					app.plugins.MultiFloatingWindow.open("ptt","0 projects", "<p>No results from this filter</p>");
+				}
+				
+				// we're all done
+				app.plugins.CRTreporter.busy = false;					
+							
+			})
+			.catch(function(error){		
+				app.plugins.MultiFloatingWindow.open("ptt","uh oh", "<p>"+error+"</p>");
+				logger("ERROR", app.plugins.CRTreporter.name + ": Error requesting data " + error);
+				spinner.stop();
+			});
+	}
+	
+	/**
+	* Function: isANumber
+	* @param (string) user input field intended for numeric (dollar) values
+	* @returns () NaN if input cannot be converted to numeric, or numeric value
+	* Function to sanitize user input to ensure it is numeric
+	*/
+	isANumber(inputVal) {
+		// Users may use $ sign and commas for thousands separator
+		var numVal = parseFloat(inputVal.replace(/\$|,/g, ''));
+		if (isNaN(numVal)) {
+			return NaN;
+		} else if (numVal < 0) {
+			return NaN;			
+		} else {
+			switch (inputVal.toUpperCase().charAt(inputVal.length-1)) {
+				// users may use shortcuts for thousands and millions
+				case "K":
+					numVal *= 1000;
+					break;
+				case "M":
+					numVal *= 1000000;
+					break;
+				case "B":
+					numVal *= 1000000000;
+					break;
+			}
+		}
+		return numVal;
+	}
+	
+	/**
+	* Function: visibleScaleNumber
+	* @param(number) A numeric value from the slider
+	* @returns(number) A numeric value equal to the slider or, if the scale is logarithmic, 10 raised to the power of the value
+	* Function to return then user view of the slider value
+	*/
+	visibleScaleNumber(scaleType, scaleNum) {
+		switch (scaleType) {
+			case "logarithmic":
+				var result = Math.pow(10,scaleNum);
+				if (result == 1) return 0;
+				return result;
+				break;
+			case "linear":
+				return scaleNum;
+				break;
+		} 
+	}
+
+	/**
+	* Function: hiddenScaleNumber
+	* @param(number) the numeric value the user sees from the slider
+	* @returns(number) A numeric value "inside" the slider, same for linear or, if the scale is logarithmic, the exponent of the value
+	* Function to return then user view of the slider value
+	*/
+	hiddenScaleNumber(scaleType, scaleNum) {
+		switch (scaleType) {
+			case "logarithmic":
+				var result = Math.log10(scaleNum);
+				if (result == -Infinity) return 0;
+				return  Math.log10(scaleNum);
+				break;
+			case "linear":
+				return scaleNum;
+				break;
+		} 
+	}
+	 
+	/**
+	 * Function: addFilterControls
+	 * @param (int) layerId
+	 * @returns () nothing
+	 * Function to filter controls specific to the layer
+	 */
+	addFilterControls(layerId) {
+		// Remove existing filters and hide fieldset
+		$("#cr-filter-controls").empty();
+		$("#cr-fs-filter-controls").hide();
+		
+		// Get the filter layer
+		$.each(app.map.getLayers().getArray(), function(index, layer) {
+			if (ol.util.getUid(layer) == layerId) {
+				app.plugins.CRTreporter.filterLayer = layer;
+			}
+		});
+		
+		// Bail if not found
+		if (!app.plugins.CRTreporter.filterLayer) return;
+		
+		// Loop through all of the configured layer fields
+		var fields = app.plugins.CRTreporter.filterLayer.get("fields");
+		$.each(fields, function(fieldIndex, field) {
+			
+			// If filters are present, build the filter controls
+			if (field.filters) {
+				
+				// CRTreporter is ASSUMING only one layer used for filtering
+				app.plugins.CRTreporter.filterLayerId = layerId;
+
+				// Loop through the filters defined for this field
+				$.each(field.filters, function(index, filter) {
+					
+					// Only build the filter control if configured correctly
+					if (filter.name && filter.type && filter.cql) {
+						
+						// Use the nameTransform if defined
+						var prettyName = field.nameTransform() ? field.nameTransform()  :  field.name;
+						
+						// check for defined list of values
+						var valueOptions = [];
+						if (filter.valueOptions) valueOptions = filter.valueOptions;
+						
+						// Define the control
+						var control;
+
+						// Build the control specific to field filter type
+						switch (filter.type) {
+							
+							// Checkbox Type
+							case "boolean":
+								// Get the control template, clone it, and set some basic properties
+								control = $(".cr-checkbox-template").clone(true);
+								control.removeClass("cr-checkbox-template");
+								control.find(".title").html(prettyName);
+								control.attr("fieldName", field.name);
+								
+								// Define the control's change function
+								control.find("input").change(function(){
+									if (this.checked === true) {
+										var cql = filter.cql;
+										cql = cql.replace("{{field}}", field.name);
+										cql = cql.replace("{{value}}", 1);
+										control.attr("userFilter", cql);
+									} else {
+										control.attr("userFilter", null);
+									}
+									
+									// Remember user input and apply filter
+									filter.lastValue = $(this).is(':checked');
+									app.plugins.CRTreporter.applyFilter();
+								});
+								
+								// Apply remembered state (if any) and trigger change event
+								if ("lastValue" in filter) control.find("input").prop("checked", filter.lastValue);
+								control.find("input").trigger("change");
+								break;
+							
+							// Textfield Type
+							case "string":
+								// handle list of values
+								if (valueOptions.length != 0) {
+									// Note all select options assumed to be multi-select
+									control = $(".cr-option-template").clone(true);
+									control.removeClass("cr-option-template");
+									control.find(".input-group-text").html(prettyName);
+									control.attr("fieldName", field.name);
+									control.find("select").attr("fieldName",field.name);
+									if ((field.name=='FIN_TARGET_FISCAL_YEAR')||(field.name=='QTY_ACCMP_FISCAL_YEAR')) { // build moving fiscal year window for these two dropdowns
+										for (let i = -10; i < 2; i++) {
+											var option = $("<option></option>");
+											var currentVal = app.plugins.CRTreporter.letsGetFiscal(i);
+											option.attr("value", currentVal);
+											option.html(currentVal);
+											control.find("select").append(option);
+											if ((i==0)&&field.name=='FIN_TARGET_FISCAL_YEAR') { // For this field select current fiscal year
+												var findString = "select option[value='"+app.plugins.CRTreporter.letsGetFiscal(i)+"']"
+												control.find(findString).prop('selected', true);
+											}										
+											$('#myselect').val([1,3,4]).trigger('change');										
+										}
+									} else
+										$.each(valueOptions, function(index, value) {
+											var option = $("<option></option>");
+											option.attr("value", value);
+											option.html(value);
+											control.find("select").append(option);
+											$('#myselect').val([1,3,4]).trigger('change');											
+										});
+									
+									// Define the control's change function
+									control.find("select").on( 'change', function(){
+										if ($(this).val() != "") {
+											var cql = filter.cql;
+											cql = cql.replace("{{field}}", field.name);
+											// deal with multiselect options	
+											if (Array.isArray($(this).val())) {
+												var values = "";
+												$(this).val().forEach(function(val) {
+													if (val.indexOf("'") > 1) {
+														 val = val.replace("'","''");    // Kludge to allow choices like "Accomplishment ($'s)"
+													}
+													var cleanVal = val;
+													// Kludge to remove leading numbers and dashes from value names
+													if (control.find("select")[0].attributes.fieldName.nodeValue=="SERVICE_AREA_NAME" || control.find("select")[0].attributes.fieldName.nodeValue=="RC_DESC") { 
+														let startAt = val.match(/[a-zA-Z]/).index
+														cleanVal = val.substr(startAt);
+													}
+													values = values + "'" + cleanVal + "',";
+												});
+												values = values.slice(0, -1); 
+												//cql = cql.replace("{{value}}", values);   // ignoring template
+												cql = field.name + " in (" + values + ")"; // More kludge to preserve SQLServer's preferred escape for single quotes, I.E. two single quotes
+											} else {
+												cql = cql.replace("{{value}}",$(this).val());	
+											}
+											
+											control.attr("userFilter", cql);
+										} else {
+											control.attr("userFilter", null);
+										}
+										
+										// Remember user input 
+										filter.lastValue = $(this).val();
+										
+										// fancy checkboxes for Steve
+										control.find('select').attr("data-selected-text-format","count > 1");
+										control.find('select').attr("data-width","100%");
+										control.find('select').attr("data-size",10);
+										control.find('select').selectpicker();
+
+									});
+									// wait for all selections to be made before making query
+									control.find("select").on('hidden.bs.select', function (e, clickedIndex, isSelected, previousValue) {
+										app.plugins.CRTreporter.applyFilter();
+									});
+
+									// Apply remembered state (if any) and trigger keyup event
+									if ("lastValue" in filter) control.find("input").val(filter.lastValue);
+									control.find("select").trigger("change");
+										
+								// normal text input
+								} else {								
+									// Get the control template, clone it, and set some basic properties
+									control = $(".cr-textfield-template").clone(true);
+									control.removeClass("cr-textfield-template");
+									control.find(".input-group-text").html(prettyName);
+									control.attr("fieldName", field.name);
+									
+									// Define the control's change function
+									// uses focusout to prevent multiple requests
+									control.find("input").focusout(function(){
+										if ($(this).val() != "") {
+											var cql = filter.cql;
+											cql = cql.replace("{{field}}", field.name);
+											cql = cql.replace("{{value}}", $(this).val());
+											control.attr("userFilter", cql);
+										} else {
+											control.attr("userFilter", null);
+										}
+										
+										// Remember user input and apply filter
+										// filter.lastValue = $(this).val(); // prevented clear filter from working
+										app.plugins.CRTreporter.applyFilter();
+									});
+									// Apply remembered state (if any) and trigger keyup event
+									if ("lastValue" in filter) control.find("input").val(filter.lastValue);
+									control.find("input").trigger("focusout");									
+								}
+								break;
+							
+							// Numberfield Type
+							case "number":
+								// Get the control template, clone it, and set some basic properties
+								control = $(".cr-numberfield-template").clone(true);
+								control.removeClass("cr-numberfield-template");
+								control.find(".input-group-text").html(prettyName);
+								control.attr("fieldName", field.name);
+								
+								// Define the control's change function
+								control.find("input").keyup(function(){
+									if ($(this).val() != "") {
+										var cql = filter.cql;
+										cql = cql.replace("{{field}}", field.name);
+										cql = cql.replace("{{value}}", $(this).val());
+										control.attr("userFilter", cql);
+									} else {
+										control.attr("userFilter", null);
+									}
+									
+									// Remember user input and apply filter
+									filter.lastValue = $(this).val();
+									app.plugins.CRTreporter.applyFilter();
+								});
+								
+								// Apply remembered state (if any) and trigger keyup event
+								if ("lastValue" in filter) control.find("input").val(filter.lastValue);
+								control.find("input").trigger("keyup");
+								break;
+
+
+							// Number-range Type
+							case "number-range":
+								// Set up range slider
+								var scaleMin = field.filters[0].minValue;
+								var scaleMax = field.filters[0].maxValue;
+								var scaleType = field.filters[0].scale;
+								control = $(".cr-number-range-template").clone(true);
+								control.removeClass("cr-number-range-template");
+								control.find(".input-group-text").html(prettyName);
+								control.attr("fieldName", field.name);
+								control.find(".cr-amount1").val(scaleMin.toLocaleString('en-US')); 
+								control.find(".cr-amount2").val(scaleMax.toLocaleString('en-US'));
+									
+								control.find(".cr-slider-range").slider({
+									range: true,
+									step: 0.001,
+									min: field.filters[0].minValue,
+									max: app.plugins.CRTreporter.hiddenScaleNumber(scaleType,field.filters[0].maxValue),
+									values: [ app.plugins.CRTreporter.hiddenScaleNumber(scaleType,field.filters[0].minValue), app.plugins.CRTreporter.hiddenScaleNumber(scaleType,field.filters[0].maxValue) ],
+									stop: function( event, ui ) {
+										var checkMax = app.plugins.CRTreporter.hiddenScaleNumber(scaleType,field.filters[0].maxValue);
+										var checkMin = app.plugins.CRTreporter.hiddenScaleNumber(scaleType,field.filters[0].minValue);
+										if ((ui.values[ 0 ] == checkMin) && (ui.values[ 1 ] == checkMax)) { // sliders at min and max positions => ignore slider filter
+											control.attr("userFilter", null);
+										}
+										app.plugins.CRTreporter.applyFilter();		
+									},
+									slide: function( event, ui ) {
+										if (ui.handleIndex == 0) { // min handle moved
+											var scaleMin = app.plugins.CRTreporter.visibleScaleNumber(field.filters[0].scale,ui.values[ 0 ]);
+											var scaleMax = app.plugins.CRTreporter.visibleScaleNumber(field.filters[0].scale,ui.values[ 1 ]);
+											$(".cr-amount1").val(Math.round(scaleMin).toLocaleString('en-US')).css("border-color", "initial");
+											var cql = filter.cql;
+											cql = cql.replace("{{field}}", field.name);
+											cql = cql.replaceAll("{{min-value}}", Math.round(scaleMin));
+											if (control.find(".cr-amount2").css("border-color")=='rgb(255, 0, 0)') { // max value is bad
+												cql = cql.replaceAll("{{max-value}}", Math.round(scaleMax));
+												$(".cr-amount2").val(Math.round(scaleMax).toLocaleString('en-US'));
+												if (!($(".cr-amount2").hasClass("form-control"))) $(".cr-amount2").addClass("form-control");
+												$(".cr-amount2").css("border-color", "#ced4da");											
+											} else {
+												cql = cql.replaceAll("{{max-value}}", app.plugins.CRTreporter.isANumber(control.find(".cr-amount2").val()));
+											}
+										} else { // max handle moved
+											var scaleMin = app.plugins.CRTreporter.visibleScaleNumber(field.filters[0].scale,ui.values[ 0 ]);
+											var scaleMax = app.plugins.CRTreporter.visibleScaleNumber(field.filters[0].scale,ui.values[ 1 ]);
+											$(".cr-amount2").val(Math.round(scaleMax).toLocaleString('en-US')).css("border-color", "initial");
+											var cql = filter.cql;
+											cql = cql.replace("{{field}}", field.name);
+											cql = cql.replaceAll("{{max-value}}", Math.round(scaleMax));
+											if (control.find(".cr-amount1").css("border-color")=='rgb(255, 0, 0)') { // min value is bad 
+												cql = cql.replaceAll("{{min-value}}", Math.round(scaleMin));
+												$(".cr-amount1").val(Math.round(scaleMinß).toLocaleString('en-US'));
+												if (!($(".cr-amount1").hasClass("form-control"))) $(".cr-amount1").addClass("form-control");
+												$(".cr-amount1").css("border-color", "#ced4da");											
+											} else {
+												cql = cql.replaceAll("{{min-value}}", app.plugins.CRTreporter.isANumber(control.find(".cr-amount1").val()));
+											}
+										}
+										control.attr("userFilter", cql);
+									}
+								});	
+								control.find(".cr-amount1").on( 'change', function(){
+									var numVal = app.plugins.CRTreporter.isANumber($(this).val());
+									if (isNaN(numVal)) {
+										$(this).removeClass("form-control");
+										$(this).css("border-color", "rgb(255, 0, 0)"); // alert user to bad input
+									} else {
+										if (!($(this).hasClass("form-control"))) $(this).addClass("form-control");
+										$(this).css("border-color", "#ced4da");
+										var scaleType = field.filters[0].scale;
+										var scaleMax = app.plugins.CRTreporter.visibleScaleNumber(scaleType,control.find(".cr-slider-range").slider( "values", 1));
+										var scaleVal = app.plugins.CRTreporter.hiddenScaleNumber(scaleType,numVal);
+										control.find(".cr-slider-range").slider( "values", 0, scaleVal );
+										var cql = filter.cql;
+										cql = cql.replace("{{field}}", field.name);
+										cql = cql.replaceAll("{{min-value}}", numVal);
+										if (control.find(".cr-amount2").css("border-color")=='rgb(255, 0, 0)') { // currently entered max value is bad, so use slider value
+											cql = cql.replaceAll("{{max-value}}", Math.round(scaleMax));
+										} else {
+											cql = cql.replaceAll("{{max-value}}", app.plugins.CRTreporter.isANumber(control.find(".cr-amount2").val()));
+										}
+										$(".cr-amount1").val(numVal.toLocaleString('en-US'));
+										control.attr("userFilter", cql);
+										app.plugins.CRTreporter.applyFilter();		
+									}
+								});
+								control.find(".cr-amount2").on( 'change', function(){
+									var numVal = app.plugins.CRTreporter.isANumber($(this).val());
+									if (isNaN(numVal)) {
+										$(this).removeClass("form-control");
+										$(this).css("border-color", "rgb(255, 0, 0)"); // alert user to bad input
+									} else {
+										if (!($(this).hasClass("form-control"))) $(this).addClass("form-control");
+										$(this).css("border-color", "#ced4da");
+										var scaleType = field.filters[0].scale;
+										var scaleMin = app.plugins.CRTreporter.visibleScaleNumber(scaleType,control.find(".cr-slider-range").slider( "values", 0));
+										var scaleVal = app.plugins.CRTreporter.hiddenScaleNumber(scaleType,numVal);
+										control.find(".cr-slider-range").slider( "values", 1, scaleVal );
+										var cql = filter.cql;
+										cql = cql.replace("{{field}}", field.name);
+										if (control.find(".cr-amount1").css("border-color")=='rgb(255, 0, 0)') { // currently entered min value is bad, so use slider value
+											cql = cql.replaceAll("{{min-value}}", Math.round(scaleMin));
+										} else {
+											cql = cql.replaceAll("{{min-value}}", app.plugins.CRTreporter.isANumber(control.find(".cr-amount1").val()));
+										}
+										cql = cql.replaceAll("{{max-value}}", numVal);
+										$(".cr-amount2").val(numVal.toLocaleString('en-US'));
+										control.attr("userFilter", cql);
+										app.plugins.CRTreporter.applyFilter();		
+									}
+								});
+								control.find(".cr-number-range-template").show();
+								break;
+						}
+						
+						// If a control was built, add it to the UX
+						if (control) {
+							$("#cr-filter-controls").append(control);
+							control.show();
+					
+						}
+						
+					}
+				});
+			}
+		});
+		
+		// Resume filter applications
+		app.plugins.CRTreporter.deferFilterApplications = false;
+		
+		// Apply filter
+		app.plugins.CRTreporter.applyFilter();
+				
+		// Show the filter fieldset
+		$("#cr-fs-filter-controls").show();	
+	}
+	
+	/**
+	 * Function: applyFilter
+	 * @param () none
+	 * @returns () nothing
+	 * Function that applies a filter
+	 */
+	applyFilter() {
+		// Bail if the application is set to defer filter (used so form can be built before calling the applyFilter function)
+		if (app.plugins.CRTreporter.deferFilterApplications === true) return;
+		
+		// Define the search layer url (modify to point to WFS if required)
+		if (app.plugins.CRTreporter.filterLayer.getSource() instanceof ol.source.TileWMS) {
+			var searchUrl = app.plugins.CRTreporter.filterLayer.getSource().getUrls()[0]; // TileWMS
+		} else if (app.plugins.CRTreporter.filterLayer.getSource() instanceof ol.source.ImageWMS) {
+			var searchUrl = app.plugins.CRTreporter.filterLayer.getSource().getUrl(); // ImageWMS
+		} else {
+			logger("WARN", app.plugins.CRTreporter.name + ": Could not determine search url for layer " + app.plugins.CRTreporter.filterLayer.get("title"));
+			return;
+		}
+		var searchUrl = searchUrl.replace(new RegExp("/ows", "ig"), "/wfs");
+			
+		// Define the search layer name
+		var searchLayerName;
+		$.each(app.plugins.CRTreporter.filterLayer.getSource().getParams(), function(parameterName, parameterValue) {
+			if (parameterName.toUpperCase() == "LAYERS") searchLayerName = parameterValue;
+		});
+		
+		// Define and build the CQL Filter object (grouped by field name)
+		var cqlFilterObject = new Object();
+		$("#cr-filter-controls").find(".cr-filter-control").each(function() {
+			var fieldName = $(this).attr("fieldName");
+			var userFilter = $(this).attr("userFilter");
+			if (fieldName && userFilter) {
+				if (!cqlFilterObject[fieldName]) cqlFilterObject[fieldName] = [];
+				cqlFilterObject[fieldName].push(userFilter);
+			}
+		});
+		
+		// Convert CQL filter object (which is already grouped) into a CQL filter array
+		var cqlFilterArray = [];
+		$.each(cqlFilterObject, function(fieldName, userFilters) {
+			cqlFilterArray.push("(" + userFilters.join(" OR ") + ")");
+		});
+		
+		// Convert CQL filter array into a string
+		var cqlFilter;
+		if (cqlFilterArray.length > 0) {
+			cqlFilter = cqlFilterArray.join(" AND ");
+		} 
+		
+		// Apply the CQL filter to the layer
+		setCqlFilter(app.plugins.CRTreporter.filterLayer, app.plugins.CRTreporter.name, cqlFilter);
+		
+		// Redraw chart if it is visible
+		if ( $("#mfw-ptt").is(":visible") ) {
+			app.plugins.CRTreporter.fetchDataForChart();
+		} 
+	}
+	
+	/**
+	 * Function: addPlugin
+	 * @param () none
+	 * @returns () nothing
+	 * Function that adds the plugin tab to the sidebar
+	 */
+	addPlugin() {
+		// Define Callback
+		var callback = function(success, tabNav, tabContent){
+			// Bail if failed
+			if (!success) {
+				logger("ERROR", app.plugins.CRTreporter.name + ": Plugin failed to initialize");
+				return;
+			}
+			
+			// Set class variables
+			app.plugins.CRTreporter.tabNav = tabNav;
+			app.plugins.CRTreporter.tabContent = tabContent;
+			
+			// Add filterable layers to filter layer selector
+			app.plugins.CRTreporter.addFilterableLayersToSelectControl();
+				
+			// Log success
+			logger("INFO", app.plugins.CRTreporter.name + ": Plugin successfully loaded");
+
+		}
+		
+		// Add the tab
+		addSideBarTab(this.tabName, this.tabContentFile, callback);
+
+	}
+}

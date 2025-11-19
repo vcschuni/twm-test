@@ -1,0 +1,403 @@
+class AttributeTableViewer {
+	
+	/**
+	 * Function: constructor
+	 * @param () none
+	 * @returns () nothing
+	 * Function that initializes the class
+	 */
+	constructor() {
+		this.name = "AttributeTableViewer";
+		this.version = 1.0;
+		this.author = "Stephen Schmuland";
+		this.pcfg = getPluginConfig(this.name);
+		this.contentFile = "application/plugins/AttributeTableViewer/tab-content.html";
+		this.selectedIndices = new Set(); // Persist selection across table rebuilds
+        this.pageSize = (this.pcfg.pageSize) ? this.pcfg.pageSize : 50;
+        this.maxTextLength = (this.pcfg.maxTextLength) ? this.pcfg.maxTextLength : 40;
+		this.addPlugin();
+	}
+
+	/**
+	 * Function: getConfiguredLayers
+	 * @param () none
+
+	 * @returns (array) results
+	 * Function that executes the search
+	 */
+	getConfiguredLayers() {
+		// Get the map layers
+		$.each(app.map.getLayers().getArray(), function (index, layer) {
+			// Check if the layer is a vector layer and has the attributeViewer property set to true
+			if (layer.get("attributeViewer") === true) {
+				 var appButton = $("<button type='button' class='ATV-layer-button btn btn-outline-secondary toggle-btn' id='attribute-table-button-" + layer.get("title") + "'>" + layer.get("title") + "</button>");
+
+				// Append the button to the layer list
+                $("#ATV-layer-list").append(appButton);
+
+                // Attach a click event to toggle the active class
+                appButton.on("click", function() {
+                    $(this).toggleClass("active");
+                    
+                    var editableLayer = false;
+                    //Check if the layer is editable
+
+
+                    // Loop through the list of plugins and check if the SelectTool plugin is enabled
+                    for (var i = 0; i < app.config.plugins.length; i++) {
+                        if (app.config.plugins[i].name == "LayerEditor") {
+                              if(layer.get("title") === app.plugins.LayerEditor.editableLayer.get("title")){
+                                editableLayer = true
+                            }
+	
+				        }
+			        }
+
+
+                  
+                    
+                    //Get list of layer attributes
+                    var layerAttributes = layer.get("attributes");
+
+                    //Check if layer is editable
+                    if (layer.get("editable") === true) {
+                        //Show editor toolbar
+                        $(".ATV-editing-toolbar").show();
+                    }
+
+
+                    //Check to see if layer is wms or wfs
+                    //Get array of features from layer  
+                    var features = layer.getSource().getFeatures();            
+                   app.plugins.AttributeTableViewer.buildAttributionTable(features, layerAttributes,editableLayer);
+                    
+                });
+
+
+            }
+			
+		})
+	}
+
+    /**
+    * Function: highlightFeaturesById
+    * @param (array) features - array of ol.Feature objects to highlight and select
+    * @returns () nothing
+    * Function that highlights and selects features in the attribute table
+    */
+    highlightFeaturesById(features,select) {
+        if (!Array.isArray(features)) return;
+
+        if(select){
+            // Add each feature ID to the selected set
+            features.forEach(feature => {
+                highlightFeature(feature, true);
+                if (feature && feature.getId) {
+                    const id = feature.getId();
+                    if (id !== undefined && id !== null) {
+                        this.selectedIndices.add(id);
+                    }
+                }
+            });
+
+            // Re-render the table for the currently active layer
+            const $activeBtn = $('#ATV-layer-list .ATV-layer-button.active');
+            if ($activeBtn.length > 0) {
+                const layerTitle = $activeBtn.text();
+                const layer = app.map.getLayers().getArray().find(l => l.get('title') === layerTitle);
+                if (layer) {
+                    const editableLayer = layer.get("title") === app.plugins.LayerEditor.editableLayer?.get("title");
+                    const layerAttributes = layer.get("attributes");
+                    const layerFeatures = layer.getSource().getFeatures();
+                    this.buildAttributionTable(layerFeatures, layerAttributes, editableLayer);
+                }
+            }
+        }else{
+            clearHighlightedFeatures()
+
+        }
+
+
+
+        
+    }
+    /**
+	 * Function: buildAttributionTable
+	 * @param () features
+     * @param () fields
+     * @param () editable
+	 * Function builds the attribution table from the selected layers features
+	 */
+	buildAttributionTable(features, fields, editable) {
+        const pageSize = this.pageSize;
+        const maxTextLength = this.maxTextLength;
+        let currentPage = 1;
+        let filteredFeatures = features.slice();
+        let totalPages = Math.ceil(filteredFeatures.length / pageSize);
+        let selectedIndices = this.selectedIndices;
+
+        function truncateText(text, maxLength) {
+            return text.length > maxLength ? text.substring(0, maxLength) + '...' : text;
+        }
+
+        function renderTablePage(page) {
+            let start = (page - 1) * pageSize;
+            let end = start + pageSize;
+            let pageFeatures = filteredFeatures.slice(start, end);
+
+            // Build table header. Only include the Edit column header if editable.
+            let tableHTML = '<thead><tr>';
+            
+            tableHTML += '<th><span id="ATV-selected-count" title="Selected Record Count" class="badge text-bg-warning">0</span></th>';
+
+            if (editable) {
+                tableHTML += '<th>Edit</th>';
+            }
+            tableHTML += '<th>ID</th>';
+            fields.forEach(field => {
+                tableHTML += `<th>${field.name}</th>`;
+            });
+            tableHTML += '</tr></thead>';
+
+            tableHTML += '<tbody>';
+            pageFeatures.forEach((feature, idx) => {
+    let rowClass = selectedIndices.has(feature.getId()) ? 'table-primary' : '';
+    tableHTML += `<tr data-feature-index="${idx}" class="${rowClass}">`;
+
+    // Checkbox cell
+    let checked = selectedIndices.has(feature.getId()) ? 'checked' : '';
+    tableHTML += `<td><input type="checkbox" class="ATV-select-checkbox" data-feature-index="${idx}" ${checked}></td>`;
+
+    if (editable) {
+        tableHTML += `<td>
+            <button type="button" class="btn btn-primary btn-sm ATV-edit-button" title="Edit" data-feature-index="${idx}">
+                <span class="oi oi-pencil"></span>
+            </button>
+        </td>`;
+    }
+
+    // Field cells
+    fields.forEach(field => {
+        let rawValue = feature.get(field.name) || '';
+        let rawText = rawValue.toString();
+        let value = truncateText(rawText, maxTextLength);
+        tableHTML += `<td title="${rawText}">${value}</td>`;
+    });
+
+    tableHTML += '</tr>';
+});
+            tableHTML += '</tbody>';
+
+            $('#ATV-feature-table').html(tableHTML);
+
+            // Bind click event for each checkbox: update selectedIndices
+            $('#ATV-feature-table').find('.ATV-select-checkbox').on('click', function(event) {
+                event.stopPropagation();
+
+                let $checkbox = $(this);
+                let idx = $(this).data('feature-index');
+                let $row = $checkbox.closest('tr');
+                let feature = pageFeatures[idx];
+                
+                 if ($checkbox.is(':checked')) {
+                    $row.addClass('table-primary');
+                    selectedIndices.add(feature.getId());
+                    highlightFeature(feature, true);
+                } else {
+                    $row.removeClass('table-primary');
+                    selectedIndices.delete(feature.getId());
+                    clearHighlightedFeatures(feature);
+                }
+                updateSelectedCount();
+            });
+
+            // Bind double-click event for table rows to zoom to feature
+            $('#ATV-feature-table tbody tr').off('dblclick').on('dblclick', function() {
+                let idx = $(this).data('feature-index');
+                let feature = pageFeatures[idx];
+                zoomToFeature(feature);
+            });
+
+            $('#ATV-feature-table tbody tr').hover(function(){
+                let idx = $(this).data('feature-index');
+                let feature = pageFeatures[idx];
+                highlightFeature(feature);},function(){clearHighlightedFeatures();});
+
+            // Bind click event for Edit button only when editable is true
+            if (editable) {
+                $('#ATV-feature-table').find('.ATV-edit-button').on('click', function(event) {
+                    //get feature being clicked
+                    let idx = $(this).data('feature-index');
+                    let feature = pageFeatures[idx];
+                    //Toggle Editor-tab-nav
+                    activateSidebarTab(app.plugins.LayerEditor.tabNav);
+                    app.plugins.LayerEditor.populateFeatureEditorSelector([feature]);
+                });
+            }
+            updateSelectedCount();
+        }
+        function renderPagination() {
+            totalPages = Math.max(1, Math.ceil(filteredFeatures.length / pageSize));
+            if (currentPage > totalPages) currentPage = totalPages;
+            $('#ATV-pagination-info').text(`${currentPage} of ${totalPages}`);
+            const prevBtn = $('#ATV-pagination-prev');
+            const nextBtn = $('#ATV-pagination-next');
+            prevBtn.prop('disabled', currentPage <= 1);
+            nextBtn.prop('disabled', currentPage >= totalPages);
+            prevBtn.off('click').on('click', function() {
+                if (currentPage > 1) {
+                    currentPage--;
+                    renderTablePage(currentPage);
+                    renderPagination();
+                }
+            });
+            nextBtn.off('click').on('click', function() {
+                if (currentPage < totalPages) {
+                    currentPage++;
+                    renderTablePage(currentPage);
+                    renderPagination();
+                }
+            });
+        }
+
+        function applyFilter() {
+            const filter = $('#ATV-search-input').val().toLowerCase();
+            if (!filter) {
+                filteredFeatures = features.slice();
+            } else {
+                filteredFeatures = features.filter(feature => {
+                    return fields.some(field => {
+                        let value = feature.get(field.name);
+                        return value && value.toString().toLowerCase().indexOf(filter) > -1;
+                    });
+                });
+            }
+            currentPage = 1;
+            renderTablePage(currentPage);
+            renderPagination();
+        }
+        function updateSelectedCount() {
+            $('#ATV-selected-count').text(selectedIndices.size);
+        }
+
+        function showOnlySelected() {
+            filteredFeatures = features.filter(feature => selectedIndices.has(feature.getId()));
+            currentPage = 1;
+            renderTablePage(currentPage);
+            renderPagination();
+        }
+
+        // Initial render
+        renderTablePage(currentPage);
+        renderPagination();
+
+        // Bind search input
+        $('#ATV-search-input').off('keyup').on('keyup', function() {
+            applyFilter();
+        });
+
+        
+        // Bind search input
+        $('#ATV-show-selected').on('click', function(){
+        showOnlySelected();
+        });
+    }
+
+	/**
+	 * Function: addPlugin
+	 * @param () none
+	 * @returns () nothing
+	 * Function that adds the plugin
+	 */
+	
+	addPlugin() {
+		// Load the floating window template
+		$.ajax({
+			url: this.contentFile,
+			cache: false,
+			dataType: "html"
+		})
+		.done(function(content) {
+			
+            //Set CSS for map to accomidate for bottom bar 
+            $("#map").css("height", "98%");
+           
+            //Show bottom bar expander
+            $("#bottom-bar-expander").show();
+
+            // Append the template to the body
+			$("#bottom-bar").append(content);
+			
+			app.plugins.AttributeTableViewer.getConfiguredLayers()
+
+           // Add event listener for the search input
+            $("#ATV-search-input").on("keyup", function() {
+                var filter = $(this).val().toLowerCase();
+                $("#ATV-feature-table tbody tr").filter(function() {
+                    $(this).toggle($(this).text().toLowerCase().indexOf(filter) > -1);
+                });
+            });
+
+             // Add event listener for the clear search button
+             $('#ATV-search-clear-btn').on('click', function(){
+                //clear the selection
+                app.plugins.AttributeTableViewer.selectedIndices.clear();
+                $('#ATV-search-input').val("");
+                $('#ATV-search-input').trigger('keyup'); // Triggers the filter logic
+             });
+
+            // Add event listener for the attribute table refresh button
+            $('#ATV-attribute-refresh').on('click', function() {
+                var $activeBtn = $('#ATV-layer-list .ATV-layer-button.active');
+                if ($activeBtn.length > 0) {
+                    $('#ATV-search-input').val("");
+                    // Clear all selected checkboxes across all pages
+                    app.plugins.AttributeTableViewer.selectedIndices.clear();
+                    var layerTitle = $activeBtn.text();
+                    var layer = app.map.getLayers().getArray().find(function(l) {
+                        return l.get('title') === layerTitle;
+                    });
+                    if (layer) {
+                        var editableLayer = false;
+                        if(layer.get("title") === app.plugins.LayerEditor.editableLayer.get("title")){
+                            editableLayer = true;
+                        }
+                        var layerAttributes = layer.get("attributes");
+                        var features = layer.getSource().getFeatures();
+                        app.plugins.AttributeTableViewer.buildAttributionTable(features, layerAttributes, editableLayer);
+                    }
+                }
+            });
+
+			// Log success
+			logger("INFO", app.plugins.AttributeTableViewer.name + ": Plugin successfully loaded");
+		})
+		.fail(function(jqxhr, settings, exception) {
+			logger("ERROR", app.plugins.AttributeTableViewer.name + ": Could not load template - " + exception);
+		}); 
+
+        //if ATV-layer-button is clicked and active, remove active class
+
+        $(document).on("click", ".ATV-layer-button", function() {
+            if ($(this).hasClass("active")) {
+                //clear ATV-feature-table
+              
+                
+            } else {
+                //clear ATV-feature-table
+                 $("#ATV-feature-table").html("");
+                 $(".ATV-editing-toolbar").hide();
+                 //clear ATV-pagination
+                 
+                 //disable ATV-pagination-controls
+                $("#ATV-pagination-prev").prop("disabled", true);
+                $("#ATV-pagination-next").prop("disabled", true);
+                //Reset ATV-pagination-info
+                $("#ATV-pagination-info").text("1 of 1");
+                $("#ATV-pagination").remove();
+                //$(this).addClass("active");
+            }
+        });
+	}
+	
+}

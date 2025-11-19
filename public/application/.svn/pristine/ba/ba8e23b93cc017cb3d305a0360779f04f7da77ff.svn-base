@@ -1,0 +1,85 @@
+class ShowClickCoordinates {
+
+	/**
+	 * Function: constructor
+	 * @param () none
+	 * @returns () nothing
+	 * Function that initializes the class
+	 */
+	constructor() {
+		this.name = "ShowClickCoordinates";
+		this.version = 1.0;
+		this.author = "";
+		this.pcfg = getPluginConfig(this.name);
+		this.addPlugin(); // Initializes the plugin
+	}
+
+	/**
+	 * Function: register
+	 * @param () none
+	 * @returns () nothing
+	 * Function that registers the plugin with TWM
+	 */
+	register() {
+		// Create, style and add the html element to the map
+		var config = {
+			id: "coordinates",
+			css: {
+				"color": "#eee",
+				"z-index": 2000,
+				"top": "8px",
+				"left": "8px",
+				"font-size": "12px",
+				"position": "absolute",
+				"background": "rgba(0,60,136,0.3)",
+				"border-radius": "4px",
+				"padding": "2px",
+				"display": "none"
+			}
+		};
+		var coordElement = $("<div>", config);
+		$("#map").append(coordElement);
+		
+		// Register map event that clears the coordinates
+		$(app.map).on("moveend", function(e) {
+			app.plugins.ShowClickCoordinates.update(null);
+		});
+		
+		// Register map event that shows the click coordinates
+		app.map.on("click", function(e) {
+			var coord = ol.proj.transform(e.coordinate, app.map.getView().getProjection().getCode(), "EPSG:4326");
+			app.plugins.ShowClickCoordinates.update(coord[0].toFixed(5) + "&deg; " + coord[1].toFixed(5) + "&deg;");
+		});
+	}
+	
+	/**
+	 * Function: update
+	 * @param (string) text to display
+	 * @returns () nothing
+	 * Function that updates the display of coordinates
+	 */
+	update(text) {
+		if (text) {
+			$("#map #coordinates").show();
+			$("#map #coordinates").html(text);
+		} else {
+			$("#map #coordinates").hide();
+		}
+	}
+	
+	/**
+	 * Function: addPlugin
+	 * @param () none
+	 * @returns () nothing
+	 * Function that adds the plugin tab to the sidebar
+	 */
+	addPlugin() {
+		// Register the plugin
+		this.register();
+		
+		
+		
+		// Log success
+		logger("INFO", this.name + ": Plugin successfully loaded");
+	}
+}

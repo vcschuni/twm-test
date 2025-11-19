@@ -1,0 +1,9 @@
+{
+	name: "Disclaimer",					// Plugin Class Name - DO NOT MODIFY [required]
+	title: "Disclaimer",				// Title of popup modal [optional - defaults to Disclaimer]
+	acceptButtonText: "Continue", 		// Button text for accepting [optional - defaults to Continue]
+	enabled: true						// Whether plugin is enabled [required]
+}
+
+
+// Note: When configured, it looks for an HTML file @ configuration/<config-name>/disclaimer-content.html

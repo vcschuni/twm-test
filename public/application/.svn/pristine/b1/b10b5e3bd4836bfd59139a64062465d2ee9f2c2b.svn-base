@@ -1,0 +1,1558 @@
+class LayerEditor {
+	/**
+	 * Function: constructor
+	 * @param () none
+	 * @returns () nothing
+	 * Function that initializes the class
+	 */
+	constructor() {
+		this.name = "LayerEditor";
+		this.version = 1.0;
+		this.author = "";
+		this.pcfg = getPluginConfig(this.name);
+		this.tabName = this.pcfg.tabName ? this.pcfg.tabName : "Layer Editor";
+		this.tabContentFile = "application/plugins/LayerEditor/tab-content.html";
+		this.tabNav;
+		this.tabContent;
+		this.spinner;
+		this.editableLayer;
+		this.editableLayerSelectedFeatureIds = [];
+		this.editableFeature;
+		this.editableFeatureOriginalGeometry;
+		this.editableFeatureAttributeChanges = [];
+		this.editableFeatureGeometryHasChanged = false;
+		this.snapableCollection = new ol.Collection(); // Store features to snap too.
+		this.addPlugin(); // Initializes the plugin
+
+		// Define and add an empty RED highlight layer
+		this.redHighlightLayer = new ol.layer.Vector({
+			source: new ol.source.Vector({}),
+			style: new ol.style.Style({
+				stroke: new ol.style.Stroke({
+					color: "rgba(255, 0, 0, 0.6)",
+					width: 8
+				})
+			})
+		});
+		app.map.addLayer(this.redHighlightLayer);
+		this.redHighlightLayer.setZIndex(651);
+	}
+
+	/**
+	 * Function: turnEditingOff
+	 * @param () none
+	 * @returns () nothing
+	 * Function to turn off all editing functionality
+	 */
+	turnEditingOff() {
+		// Remove the interactions
+		if (this.modify) app.map.removeInteraction(this.modify);
+		if (this.select) app.map.removeInteraction(this.select);
+		if (this.draw) app.map.removeInteraction(this.draw);
+		if (this.snap) app.map.removeInteraction(this.snap);
+		if (this.delete) app.map.removeInteraction(this.delete);
+		if (this.dragBox) app.map.removeInteraction(this.dragBox);
+
+		// Turn off red highlighting on hover
+		this.redHighlightLayer.getSource().clear();
+		app.map.un("pointermove", this.highlightFeatureOnHover);
+
+		// Reset default single click function
+		resetDefaultMapSingleClickFunction();
+
+		// Clear and hide attribute editing
+		this.populateFeatureEditorSelector(null);
+
+		// Empty and hide copy features list
+		$("#le-copying-container").empty();
+		$("#le-copying-container").hide();
+	}
+	
+	/**
+	 * Function: populateFeatureEditorSelector
+	 * @param (object) features
+	 * @returns () nothing
+	 * Function to populate and show the editable features (if more than one was selected)
+	 */
+	populateFeatureEditorSelector(features) {
+		// Reset editable feature selector and form
+		$("#le-editable-feature-select").parent().hide();
+		$("#le-editable-feature-select").empty();
+		$("#le-editable-feature-select-count").empty();
+		app.plugins.LayerEditor.editableLayerSelectedFeatureIds = [];
+		this.showFeatureEditor(null);
+		
+		// Bail if no features were passed
+		if (features == null) return;
+		if (features.length == 0) return;
+		
+		// Remember selected feature IDs
+		$.each(features, function (index, feature) {
+			app.plugins.LayerEditor.editableLayerSelectedFeatureIds.push(feature.getId());
+		});
+		
+		// Build the feature name
+		var titleFields = [];
+		$.each(this.editableLayer.get("fields"), function (index, field) {
+			if (field.title) titleFields.push(field.name);
+		});
+		
+		// Populate the editable feature selector with the passed features
+		$.each(features, function (index, feature) {
+			var properties = feature.getProperties();
+			var titleValues = [];
+			titleValues.push("[" + ol.util.getUid(feature) + "]");
+			$.each(titleFields, function (index, titleField) {
+				if (properties[titleField]) titleValues.push(properties[titleField]);
+			});
+			var title = titleValues.join(" - ");
+			var option = $("<option></option>");
+			option.attr("value", feature.getId());
+			option.html(title);
+			$("#le-editable-feature-select").append(option);
+		});
+		
+		// Show the editable feature selector
+		$("#le-editable-feature-select").parent().show();
+		
+		// Show the selected feature count
+		$("#le-editable-feature-select-count").html(features.length);
+		
+		// Set the first feature as editable
+		this.showFeatureEditor(features[0].getId());
+	}
+
+	/**
+	 * Function: showFeatureEditor
+	 * @param (integer) featureId
+	 * @returns () nothing
+	 * Function to show and populate the feature editor for the passed feature ID
+	 */
+	showFeatureEditor(featureId) {
+		// Reset the attribute editing form
+		tinymce.remove("textarea.le-attr-htmleditor");
+		$("#le-attribute-form .le-attr-input-div").remove();
+		$("#le-attribute-form").hide();
+		
+		// Reset feature change trackers
+		app.plugins.LayerEditor.editableFeatureAttributeChanges = [];
+		app.plugins.LayerEditor.editableFeatureGeometryHasChanged = false;
+		
+		// Run feature change watcher
+		app.plugins.LayerEditor.featureChangeWatcher();
+		
+		// Close an existing popup if necessary
+		closePopup();
+		
+		// Bail if a null featureId was passed
+		if (!featureId) return;
+		
+		// Set the editable feature
+		this.editableFeature = this.editableLayer.getSource().getFeatureById(featureId);
+		
+		// Keep track of the original geometry to fall back on (as a clone)
+		this.editableFeatureOriginalGeometry = this.editableFeature.getGeometry().clone();
+		
+		// Make the focus feature the only one in the selection set (i.e. change the selected geometry)
+		if (app.plugins.LayerEditor.select) {
+			app.plugins.LayerEditor.select.getFeatures().clear();
+			app.plugins.LayerEditor.select.getFeatures().push(this.editableFeature);
+		}
+
+		// Get feature properties
+		var featureProperties = this.editableFeature.getProperties();
+		
+		// Add each key and value as a row
+		Object.keys(featureProperties).forEach((key) => {
+			// Skip if the geometry column
+			if (key === app.plugins.LayerEditor.editableLayer.getSource().geometryColumnName) return;
+
+			// Get configured field details
+			var prettyFieldName = key;
+			var editable = false;
+			var valueOptions = [];
+			var controlType = null;
+			$.each(this.editableLayer.get("fields"), function (index, field) {
+				if (field.name === key) {
+					if (field.editable) editable = true;
+					if (field.nameTransform) prettyFieldName = field.nameTransform();
+					if (field.valueOptions) valueOptions = field.valueOptions;
+					if (field.controlType) controlType = field.controlType;
+				}
+			});
+			
+			// If the controlType was not specified, guess it from the dataType
+			if (controlType == null) {
+				// Get the dataType (if exists)
+				var dataType = "string";
+				if (this.editableLayer.get("attributes")) {
+					$.each(this.editableLayer.get("attributes"), function (index, attribute) {
+						if (attribute.name === key) {
+							if (attribute.localType) dataType = attribute.localType;
+						}
+					});
+				}
+				
+				// Set controlType based on dataType
+				switch (dataType) {
+					case "number":
+						controlType = "number-input";
+						break;
+					case "date-time":
+						controlType = "date-time-input";
+						break;
+					default:
+						controlType = "text-input";
+						break;
+				}
+			}
+
+			// Get the field value
+			var value = featureProperties[key];
+
+			// Build attribute input for field with NO specified value options
+			var input;
+			if (valueOptions.length == 0) {
+				switch (controlType) {
+					case "text-input":
+						input = $(".le-attr-input-template-text").clone(true);
+						input.removeClass("le-attr-input-template-text");
+						input.find("span").html(prettyFieldName);
+						input.find("input").attr("key", key);
+						input.find("input").val(value);
+						input.find("input").data("original-value", value);
+						if (!editable) input.find("input").prop("disabled", true);
+						break;
+					
+					case "textarea-input":
+						input = $(".le-attr-input-template-textarea").clone(true);
+						input.removeClass("le-attr-input-template-textarea");
+						input.find("span").html(prettyFieldName);
+						input.find("textarea").attr("key", key);
+						input.find("textarea").val(value);
+						input.find("textarea").data("original-value", value);
+						if (!editable) input.find("textarea").prop("disabled", true);
+						break;
+					
+					case "html-input":
+						input = $(".le-attr-input-template-htmleditor").clone(true);
+						input.removeClass("le-attr-input-template-htmleditor");
+						input.find("span").html(prettyFieldName);
+						input.find("textarea").addClass("le-attr-htmleditor");
+						input.find("textarea").attr("key", key);
+						input.find("textarea").val(value);
+						input.find("textarea").data("original-value", value);
+						if (!editable) input.find("textarea").prop("disabled", true);
+						break;
+						
+					case "number-input":
+						input = $(".le-attr-input-template-number").clone(true);
+						input.removeClass("le-attr-input-template-number");
+						input.find("span").html(prettyFieldName);
+						input.find("input").attr("key", key);
+						input.find("input").val(value);
+						input.find("input").data("original-value", value);
+						if (!editable) input.find("input").prop("disabled", true);
+						break;
+						
+					case "date-time-input":
+						if (value.slice(-1) == "Z") {
+							value = value.substring(0, value.length - 1);
+						}
+						input = $(".le-attr-input-template-datetime").clone(true);
+						input.removeClass("le-attr-input-template-datetime");
+						input.find("span").html(prettyFieldName);
+						input.find("input").attr("key", key);
+						input.find("input").val(value);
+						input.find("input").data("original-value", value);
+						if (!editable) input.find("input").prop("disabled", true);
+						break;
+						
+					default:
+						input = null;
+						break;
+				}
+			
+			// Build attribute input for field with specified value options	(i.e. OPTIONS CONTROL)	
+			} else {
+				input = $(".le-attr-input-template-option").clone(true);
+				input.removeClass("le-attr-input-template-option");
+				input.find("span").html(prettyFieldName);
+				input.find("select").attr("key", key);
+				$.each(valueOptions, function (index, value) {
+					var option = $("<option></option>");
+					option.attr("value", value);
+					option.html(value);
+					input.find("select").append(option);
+				});
+				input.find("select").val(value);
+				input.find("select").data("original-value", value);
+				if (!editable) input.find("select").prop("disabled", true);
+			}
+
+			// Add attribute input
+			if (input) {
+				$("#le-attribute-form").append(input);
+				input.show();
+			}
+		});
+
+		// Show attribute editing form
+		$("#le-attribute-form").show();
+
+		// Add change listeners to inputs
+		$("#le-attribute-form .le-form-input").on("input", (e) => {
+			// Get the input
+			var input = $(e.target);
+			var originalValue = input.data("original-value");
+			var currentValue = input.val();
+			
+			// Get the key
+			var key = input.attr("key");
+
+			// Track change
+			if (originalValue != currentValue) {
+				if (!app.plugins.LayerEditor.editableFeatureAttributeChanges.includes(key)) {
+					app.plugins.LayerEditor.editableFeatureAttributeChanges.push(key);
+				}
+			} else {
+				if (app.plugins.LayerEditor.editableFeatureAttributeChanges.includes(key)) {
+					app.plugins.LayerEditor.editableFeatureAttributeChanges.splice(app.plugins.LayerEditor.editableFeatureAttributeChanges.indexOf(key), 1);
+				}
+			}
+			
+			// Run feature change watcher
+			app.plugins.LayerEditor.featureChangeWatcher();
+		});
+	
+		// Initialize html editors if required
+		tinymce.init({
+			selector: "textarea.le-attr-htmleditor",
+			promotion: false,
+			license_key: "gpl",
+			menubar: false,
+			plugins: "code",
+			toolbar: "undo redo bold italic alignleft aligncenter alignright alignjustify indent outdent code",
+			toolbar_mode: "wrap",
+			statusbar: false,
+			height: 225,
+			setup: function(editor){
+				editor.on("input change", (e) => {
+					var assocTextAreaElement = $("#" + editor.id);
+					assocTextAreaElement.val(editor.getContent());
+					assocTextAreaElement.trigger("input");
+				});
+			}
+		});		
+	}
+	
+	/**
+	 * Function: transferAttributesOntoEditableFeature
+	 * @param () none
+	 * @returns () nothing
+	 * Function to transfer changed attributes on ol feature (prior to saving)
+	 */
+	transferAttributesOntoEditableFeature() {
+		$("#le-attribute-form .le-form-input").each(function(){
+			// Get the input
+			var input = $(this);
+			var currentValue = input.val();
+			
+			// Get the key
+			var key = input.attr("key");
+			
+			// Modify the editable feature attribute
+			if (input.prop("disabled") === false) {
+				app.plugins.LayerEditor.editableFeature.set(key, currentValue);
+			}
+		});
+	}
+
+	/**
+	 * Function: featureChangeWatcher
+	 * @param () none
+	 * @returns () nothing
+	 * Function to that watches changes to a feature and modifies the interface to suit
+	 */
+	featureChangeWatcher() {
+		if (app.plugins.LayerEditor.editableFeatureAttributeChanges.length > 0 || app.plugins.LayerEditor.editableFeatureGeometryHasChanged == true) {
+			if (isMobile()) {
+				$("#le-save-discard-changes-btn-container").detach().appendTo("body");
+				$("#le-save-discard-changes-btn-container").css("width", "100%");
+				$("#le-save-discard-changes-btn-container").css("bottom", "25px");
+			} else {
+				$("#le-save-discard-changes-btn-container").detach().appendTo("#le-attribute-form");
+				$("#le-save-discard-changes-btn-container").css("width", "calc(100% - 55px)");
+				$("#le-save-discard-changes-btn-container").css("bottom", "12px");
+				showSidebar();
+				activateSidebarTab(app.plugins.LayerEditor.tabNav);
+			}
+			$("#le-save-discard-changes-btn-container").show();
+				if (app.plugins.LayerEditor.select) app.plugins.LayerEditor.select.setActive(false);
+		} else {
+			$("#le-save-discard-changes-btn-container").hide();
+			if (app.plugins.LayerEditor.select) app.plugins.LayerEditor.select.setActive(true);
+		}
+	}
+
+	/**
+	 * Function: checkForUnsavedChanges
+	 * @param () none
+	 * @returns (boolean) whether editable feature has unsvaed changes
+	 * Function to check for unsaved changes and prompt user to save/discard
+	 */
+	checkForUnsavedChanges() {
+		if (app.plugins.LayerEditor.editableFeatureAttributeChanges.length > 0 || app.plugins.LayerEditor.editableFeatureGeometryHasChanged == true) {
+			bootbox.dialog({
+				title: "Unsaved Changes",
+				message: "You have unsaved changes.  What do you want to do?",
+				closeButton: true,
+				centerVertical: true,
+				buttons: {
+					discard: {
+						label: "Discard Changes",
+						className: "btn-warning",
+						callback: function () {
+							$(this).modal("hide");
+							$("#le-discard-changes-btn").trigger("click");
+						}
+					},
+					save: {
+						label: "Save Changes",
+						className: "btn-success",
+						callback: function () {
+							$(this).modal("hide");
+							$("#le-save-changes-btn").trigger("click");
+						}
+					}
+				}
+			});
+			return true;
+		} else {
+			return false;
+		}
+	}
+	
+	/**
+	 * Function: saveFeature
+	 * @param () none
+	 * @returns () nothing
+	 * Function to save feature changes
+	 */
+	saveFeature() {
+		// Show working
+		app.plugins.LayerEditor.showLayerEditorWorking(true);
+		
+		// Transfer the changes over to the editable feature
+		app.plugins.LayerEditor.transferAttributesOntoEditableFeature();
+		
+		// Execute the write function and handle the response
+		app.plugins.LayerEditor.executeWFSTransaction(null, [app.plugins.LayerEditor.editableFeature], null, function(success, res) {
+			if (success === true) {
+						
+				// Refresh the editable layer
+				app.plugins.LayerEditor.editableLayer.set("isLoading", true); // trigger this toggle early
+				app.plugins.LayerEditor.editableLayer.getSource().refresh();
+				
+				// Define the function that will monitor the editable layer and do some actions after it has finished loading
+				var attempt = 0;
+				var lastEditableFeatureId = app.plugins.LayerEditor.editableFeature.getId();
+				var waitForCompletedRefresh = function() {
+					if (app.plugins.LayerEditor.editableLayer.get("isLoading") == false) {
+						var selectedFeatures = [];
+						$.each(app.plugins.LayerEditor.editableLayerSelectedFeatureIds, function (index, featureId) {
+							selectedFeatures.push(app.plugins.LayerEditor.editableLayer.getSource().getFeatureById(featureId));
+						});
+						app.plugins.LayerEditor.populateFeatureEditorSelector(selectedFeatures);
+						app.plugins.LayerEditor.showFeatureEditor(lastEditableFeatureId);
+						app.plugins.LayerEditor.showLayerEditorWorking(false);
+					} else {
+						attempt++;
+						if (attempt < 75) {
+							setTimeout(waitForCompletedRefresh, 250);
+						} else {
+							logger("ERROR", "Gave up waiting for layer to reload after edit");
+							app.plugins.LayerEditor.showLayerEditorWorking(false);
+						}
+					}
+				}
+				waitForCompletedRefresh()
+			}
+		});
+	}
+
+	/**
+	* Function: executeWFSTransaction
+	 * @param (array) added
+	 * @param (array) modified
+	 * @param (array) removed
+	 * @param (function) callback
+	 * @returns () nothing
+	 * Function to add/modify/remove feature via WFS-T transaction
+	 */
+	executeWFSTransaction(added, modified, removed, callback) {
+		// Show the map spinner
+		showMapSpinner();
+
+		// Handle optional parameters
+		callback = callback || function () {};
+
+		// Define the WFS format
+		var formatWFS = new ol.format.WFS();
+
+		// Define the GML format
+		var formatGML = new ol.format.GML({
+			featureNS:
+			app.plugins.LayerEditor.editableLayer.getSource().layerNamespace,
+			featureType: app.plugins.LayerEditor.editableLayer.getSource().layerName,
+			version: "1.1.0",
+			geometryName:
+			app.plugins.LayerEditor.editableLayer.getSource().geometryColumnName,
+			srsName: app.map.getView().getProjection().getCode()
+		});
+
+		// Build the xml packet
+		var xml = formatWFS.writeTransaction(added, modified, removed, formatGML);
+
+		// Convert xml packet to a string
+		var data = new XMLSerializer().serializeToString(xml);
+
+		// Replace typeName="feature:<layer_name>" with typeName="<layer_namespace>:<layer_name>"
+		data = data.replace(
+			/typeName="feature:/,
+			'typeName="' + this.editableLayer.getSource().layerNamespace + ":"
+		);
+
+		// Post the transaction packet to the WFS-T endpoint
+		$.ajax({
+			type: "POST",
+			url: app.plugins.LayerEditor.editableLayer.getSource().layerUrl,
+			contentType: "text/xml",
+			dataType: "xml",
+			processData: false,
+			data: data
+		})
+
+		// Handle a valid response
+		.done(function (response) {
+			hideMapSpinner();
+			var result = formatWFS.readTransactionResponse(response);
+			callback(true, result);
+		})
+
+		// Handle a failure
+		.fail(function (jqxhr, settings, exception) {
+			hideMapSpinner();
+			logger(
+				"ERROR",
+				"Error commiting transaction to " + app.plugins.LayerEditor.editableLayer.getSource().layerUrl + " [" + exception + "]"
+			);
+
+			// Warn user of error and give them a chance to retry.
+			bootbox.dialog({
+				title: "ERROR",
+				message: "Could not modify '<i>" + app.plugins.LayerEditor.editableLayer.get("title") + "</i>'",
+				size: "small",
+				closeButton: false,
+				centerVertical: true,
+				buttons: {
+					retry: {
+						label: "Retry",
+						className: "btn-success",
+						callback: function () {
+							$(this).modal("hide");
+							app.plugins.LayerEditor.executeWFSTransaction(added, modified, removed, callback);
+						}
+					},
+					cancel: {
+						label: "Cancel",
+						className: "btn-danger",
+						callback: function () {
+							app.plugins.LayerEditor.editableLayer.getSource().refresh();
+							$(this).modal("hide");
+						}
+					}
+				}
+			});
+		});
+	}
+
+	/**
+	 * Function populateFeatureList
+	 * @param {Array} features
+	 *
+	 * Populate the side bar with a list of features possibly
+	 * from different layers. The user will then have the option
+	 * to copy into the editable layer.
+	 */
+	populateFeatureList(layers) {
+		// Show the editor tab
+		activateSidebarTab(app.plugins.LayerEditor.tabNav);
+
+		// Show sidebar immediately if desktop
+		if (!isMobile()) showSidebar();
+
+		// Empty any existing results
+		$("#le-copying-container").empty();
+		$("#le-copying-container").show();
+
+		// loop through the layers
+		layers.forEach((layer) => {
+			const numFeatures = layer.features.features.length;
+			const title = `<div class="title"><i class="oi oi-plus"></i>${layer.title}</div><span class="badge bg-primary number rounded-pill">${numFeatures}</span>`;
+
+			const titleEl = $('<li class="features list-group-item d-flex justify-content-between align-items-center"></li>')
+				.html(title)
+				.data("geom", layer.features)
+
+			// Highlight features on map
+			.on("mouseenter", (e) => {
+				const geom = $(e.target).data("geom"); // Grab bound data
+				const features = new ol.format.GeoJSON().readFeatures(geom);
+				features.forEach((feature) => highlightFeature(feature, true));
+			})
+
+			// Remove highlighed features from map
+			.on("mouseleave", (e) => {
+				clearHighlightedFeatures();
+			})
+
+			// Add to editable layer
+			.on("click", (e) => {
+				const geom = $(e.target).data("geom"); // Grab bound data
+
+				// Refresh editable layer on callback
+				const callback = (res) => {
+					app.plugins.LayerEditor.editableLayer.getSource().refresh();
+				};
+
+				// Read the features
+				const copiedFeatures = new ol.format.GeoJSON().readFeatures(geom);
+
+				// Get editable layer's attrubute transforms (if any)
+				var attributeTransforms = app.plugins.LayerEditor.editableLayer.get("attributeTransforms");
+
+				// Loop thru the source (copied) features and prepare them for posting to the target
+				$.each(copiedFeatures, function (index, copiedFeature) {
+            
+					// Loop thru each copied feature's property
+					$.each(copiedFeature.getProperties(), function (key, property) {
+						// Set the source feature's geometry name to the target feature's geometry name.  This is
+						// a total hack as OpenLayers does not fully respect "setGeometryName" alone, so one has
+						// to unset and reassign the geometry manually - barf :-(
+						if (key == copiedFeature.getGeometryName()) {
+							copiedFeature.unset(key);
+							copiedFeature.set(
+								app.plugins.LayerEditor.editableLayer.getSource().geometryColumnName,
+								property
+							);
+							copiedFeature.setGeometryName(
+								app.plugins.LayerEditor.editableLayer.getSource().geometryColumnName
+							);
+						}
+
+						// If the editable layer has attribute transform configuration ste, remap source property to target property
+						if (attributeTransforms) {
+							$.each(attributeTransforms, function (toAttribute, fromAttribute) {
+								if (key == fromAttribute) {
+									copiedFeature.unset(key);
+									copiedFeature.set(toAttribute, property);
+								}
+							});
+						}
+					});
+				});
+
+				// Add as an wfs transaction
+				this.executeWFSTransaction(copiedFeatures, null, null, callback);
+			});
+
+			$("#le-copying-container").append(titleEl);
+		});
+	}
+
+	/**
+	 * Function: toggleEditorFunction
+	 * @param (string) action
+	 * @returns () nothing
+	 * Function to toggle (activate) an editing function based on passed action
+	 */
+	toggleEditorFunction(action) {
+		/**
+		 * Function: copyFeatures
+		 * @param (object) searchFeature
+		 * @returns () nothing
+		 * Function copy features
+		 */
+		const copyFeatures = (searchFeature) => {
+			// Show map spinner;
+			showMapSpinner();
+
+			// Count the number of available visible map overlay layers
+			let availableLayerCount = 0;
+			$.each(app.map.getLayers().getArray(), function (index, layer) {
+				// Bail if not an acceptable visible overlay layer
+				if (layer.get("type") != "overlay" || layer.get("visible") !== true || typeof layer.getSource().getFeatureInfoUrl != "function") return;
+
+				// Made it here, count the layer
+				availableLayerCount++;
+			});
+
+			// Query each available visible overlay layer for features
+			var collector = [];
+			$.each(app.map.getLayers().getArray(), function (index, layer) {
+				// Bail if not an acceptable visible overlay layer
+				if (layer.get("type") != "overlay" || layer.get("visible") !== true || typeof layer.getSource().getFeatureInfoUrl != "function") return;
+
+				// Define the layer url
+				var layerUrl;
+				if (layer.getSource() instanceof ol.source.TileWMS) {
+					layerUrl = layer.getSource().getUrls()[0]; // TileWMS
+				} else if (layer.getSource() instanceof ol.source.ImageWMS) {
+					layerUrl = layer.getSource().getUrl(); // ImageWMS
+				}
+				layerUrl = layerUrl.replace(new RegExp("/ows", "ig"), "/wfs");
+				layerUrl = layerUrl.replace(new RegExp("/wms", "ig"), "/wfs");
+
+				// Get the typeName (layers) which will often be a combo of namespace and layer name (i.e. hwy:DSA_CONTRACT_AREA)
+				var typeName = layer.getSource().getParams().LAYERS;
+
+				// Get the name of the geometry column name
+				var geometryField;
+				$.each(layer.get("attributes"), function (index, attribute) {
+					if (attribute.type.startsWith("gml:")) {
+						geometryField = attribute.name;
+					}
+				});
+
+				// Skip layer if layer has no geometry field defined
+				if (geometryField == null) {
+					logger(
+						"ERROR",
+						app.plugins.LayerEditor.name + ": " + layer.get("title") + " does not have a geometry field defined"
+					);
+					return;
+				}
+
+				// Get the layer title
+				var title = layer.get("title");
+
+				// Transform the passed feature (which is in map coords) into layer's coordinate system
+				var featureInLayerCoords = transformFeature(
+					searchFeature,
+					app.map.getView().getProjection().getCode(),
+					layer.get("nativeProjection")
+				);
+				var wktFormat = new ol.format.WKT();
+				var searchWKT = wktFormat.writeGeometry(
+					featureInLayerCoords.getGeometry()
+				);
+
+				// Issue the GetFeature request
+				$.ajax({
+					type: "GET",
+					url: layerUrl,
+					timeout: 10000,
+					dataType: "json",
+					data: {
+						service: "WFS",
+						version: "1.1.0",
+						request: "GetFeature",
+						typeNames: typeName,
+						outputFormat: "application/json",
+						maxFeatures: 1000,
+						srsName: app.map.getView().getProjection().getCode(),
+						cql_filter: "INTERSECTS(" + geometryField + "," + searchWKT + ")"
+					},
+					xhrFields: {
+						withCredentials: layer.get("withCredentials") ? layer.get("withCredentials") : false,
+					},
+				})
+				.done(function (features) {
+					// Add returned features to collector
+					collector.push({ title, features });
+
+					// Send all collected features to the sidebar when everything is done
+					if (collector.length == availableLayerCount) {
+						hideMapSpinner();
+						app.plugins.LayerEditor.populateFeatureList(collector);
+					}
+				})
+				.fail(function (jqxhr, settings, exception) {
+					// Log the error
+					logger(
+						"ERROR",
+						app.plugins.LayerEditor.name + ": Could not copy features from " + layer.get("title") + " - " + exception
+					);
+
+					// Add returned features to collector
+					var emptyObj = new Object();
+					collector.push({ title, emptyObj });
+
+					// Send all collected features to the sidebar when everything is done
+					if (collector.length == availableLayerCount) {
+						hideMapSpinner();
+						app.plugins.LayerEditor.populateFeatureList(collector);
+					}
+				});
+			});
+		}
+
+		/**
+		 * Function: toggleCopyFeature
+		 * @param () none
+		 * @returns () nothing
+		 * Function to toggle the copy feature tool
+		 */
+		const toggleCopyFeature = () => {
+			// Prepare for new map interaction
+			this.turnEditingOff();
+
+			// Copy based on a point click
+			this.copyPoint = (e) => {
+				// Proceed only if a map click
+				if (!e.originalEvent.path[0].matches("canvas") && !$(e.originalEvent.path[0]).hasClass("ol-layer")) return;
+
+				// If in box select mode get out.
+				if (e.originalEvent.ctrlKey) return;
+
+				// Transform the map click coordinate into a tiny polygon feature (in map
+				// coordinates).  Use a radius of 2 units and transform to 16 edges.
+				var polygon = ol.geom.Polygon.fromCircle(
+					new ol.geom.Circle(e.coordinate, 2),
+					16
+				);
+				var searchFeature = new ol.Feature(polygon);
+
+				// Query for features
+				copyFeatures(searchFeature);
+			};
+
+			// Copy based on drawing a box
+			this.copyBox = (e) => {
+				// Convert dragbox extent geometry into a feature
+				var searchFeature = new ol.Feature({
+					geometry: this.dragBox.getGeometry(),
+				});
+
+				// Query for features
+				copyFeatures(searchFeature);
+			};
+
+			// The interaction for drawing a box
+			this.dragBox = new ol.interaction.DragBox({
+				condition: ol.events.condition.platformModifierKeyOnly,
+			});
+
+			// Redirect single map click
+			redirectMapSingleClickFunction("alias", this.copyPoint);
+
+			// Listen to box drag
+			app.map.addInteraction(this.dragBox);
+			this.dragBox.on("boxend", this.copyBox);
+		};
+
+		/**
+		 * Function: toggleAddFeature
+		 * @param (string) feature type
+		 * @returns () nothing
+		 * Function to toggle the add feature tool
+		 */
+		const toggleAddFeature = (featureType) => {
+			// Prepare for new map interaction
+			this.turnEditingOff();
+			redirectMapSingleClickFunction("copy", null);
+
+			// Determine which tool to build
+			var type;
+			switch (featureType) {
+				case "point":
+					type = "Point";
+					break;
+				case "linestring":
+					type = "MultiLineString";
+					break;
+				case "polygon":
+					type = "MultiPolygon";
+					break;
+			}
+
+			// Define and add new map interactions
+			this.draw = new ol.interaction.Draw({
+				source: app.plugins.LayerEditor.editableLayer.getSource(),
+				type: type,
+				geometryName: app.plugins.LayerEditor.editableLayer.getSource().geometryColumnName
+			});
+			this.snap = new ol.interaction.Snap({
+				features: this.snapableCollection
+			});
+			app.map.addInteraction(this.draw);
+			app.map.addInteraction(this.snap);
+
+			// Register map interaction listener
+			this.draw.on("drawend", (e) => {
+				// Get the feature
+				var feature = e.feature;
+				
+				// Define the callback
+				var callback = function (success, result) {
+					// Get the new feature ID
+					var newlyInsertedFeatureId = result.insertIds[0];
+					
+					// Refresh the editable layer
+					app.plugins.LayerEditor.editableLayer.set("isLoading", true); // trigger this toggle early
+					app.plugins.LayerEditor.editableLayer.getSource().refresh();
+					
+					// Define the function that will monitor the editable layer and do some actions after it has finished loading
+					var attempt = 0;
+					var waitForCompletedRefresh = function() {
+						if (app.plugins.LayerEditor.editableLayer.get("isLoading") == false) {
+							var newFeature = app.plugins.LayerEditor.editableLayer.getSource().getFeatureById(newlyInsertedFeatureId);
+							if (newFeature) {
+								// Switch to the modify feature tool
+								$(".le-edit-btn[data-action=modify]").trigger("click");
+								
+								// Edit the feature
+								app.plugins.LayerEditor.populateFeatureEditorSelector([newFeature]);
+							}
+							app.plugins.LayerEditor.showLayerEditorWorking(false);
+						} else {
+							attempt++;
+							if (attempt < 75) {
+								setTimeout(waitForCompletedRefresh, 250);
+							} else {
+								logger("ERROR", "Gave up waiting for layer to reload after new insert");
+								app.plugins.LayerEditor.showLayerEditorWorking(false);
+							}
+						}
+					}
+					waitForCompletedRefresh()
+				};
+
+				// Execute the transaction
+				this.executeWFSTransaction([feature], null, null, callback);
+			});
+		};
+
+		/**
+		 * Function: toggleModifyFeature
+		 * @param () none
+		 * @returns () nothing
+		 * Function to toggle the modify feature tool
+		 */
+		const toggleModifyFeature = () => {
+			// Prepare for new map interaction
+			this.turnEditingOff();
+			redirectMapSingleClickFunction("alias", null);
+
+			// Show the layer editor tab
+			activateSidebarTab(app.plugins.LayerEditor.tabNav);
+
+			// Determine what can be modified (as configured)
+			var allowGeometryModification = false;
+			var allowAttributeModification = false;
+			if (app.plugins.LayerEditor.editableLayer.get("allowedModifications")) {
+				if (app.plugins.LayerEditor.editableLayer.get("allowedModifications").geometry === true) allowGeometryModification = true;
+				if (app.plugins.LayerEditor.editableLayer.get("allowedModifications").attributes === true) allowAttributeModification = true;
+			}
+
+			// Define, register, and add the SELECT map interaction
+			this.select = new ol.interaction.Select({
+				layers: [app.plugins.LayerEditor.editableLayer],
+				multi: true,
+				style: new ol.style.Style({
+					fill: new ol.style.Fill({
+						color: "rgba(255, 255, 255, 0.5)",
+					}),
+					stroke: new ol.style.Stroke({
+						color: "#ffc400",
+						width: 3,
+					}),
+					image: new ol.style.Circle({
+						radius: 7,
+						stroke: new ol.style.Stroke({
+							color: "white",
+							width: 2,
+						}),
+						fill: new ol.style.Fill({
+							color: "#ffc400",
+						})
+					}),
+					zIndex: 1
+				})
+			});
+			this.select.on("select", (e) => {
+				// Prompt to deal with unsaved feature changes if they exist
+				if(app.plugins.LayerEditor.checkForUnsavedChanges()) {
+					return;
+				}
+				if (allowAttributeModification) {
+					this.populateFeatureEditorSelector(this.select.getFeatures().getArray());
+				}
+			});
+			app.map.addInteraction(this.select);
+
+			// Define, register, and add the MODIFY map interaction
+			if (allowGeometryModification) {
+				// Define the modify interaction
+				this.modify = new ol.interaction.Modify({
+					features: this.select.getFeatures(),
+				});
+				
+				// Register geometry modify event handler
+				this.modify.on("modifyend", (e) => {
+					// Track a geometry change and update ux
+					app.plugins.LayerEditor.editableFeatureGeometryHasChanged = true;
+					
+					// Run feature change watcher
+					app.plugins.LayerEditor.featureChangeWatcher();
+				});
+				
+				// Add it to the map
+				app.map.addInteraction(this.modify);
+			}
+
+			// Define and add the SNAP map interaction
+			if (allowGeometryModification) {
+				this.snap = new ol.interaction.Snap({
+					source: app.plugins.LayerEditor.editableLayer.getSource(),
+				});
+				app.map.addInteraction(this.snap);
+			}
+		}
+
+		/**
+		 * Function: toggleDeleteFeature
+		 * @param () none
+		 * @returns () nothing
+		 * Function to toggle the delete feature tool
+		 */
+		const toggleDeleteFeature = () => {
+			// Prepare for new map interaction
+			this.turnEditingOff();
+			redirectMapSingleClickFunction("alias", null);
+
+			// Turn on red highlight on hover
+			app.map.on("pointermove", this.highlightFeatureOnHover);
+
+			// Define and add new map interactions
+			this.delete = new ol.interaction.Select({
+				layers: [app.plugins.LayerEditor.editableLayer],
+			});
+			app.map.addInteraction(this.delete);
+
+			// Register map interaction listener
+			this.delete.getFeatures().on("add", (f) => {
+				this.editableLayer.getSource().removeFeature(f.element);
+				this.redHighlightLayer.getSource().clear();
+				this.executeWFSTransaction(null, null, [f.element]);
+			});
+		}
+
+		// Toggle edit function based on passed action
+		switch (action) {
+			case "polygon": // Fall-through for all feature additions
+			case "point":
+			case "linestring":
+			case "circle":
+				toggleAddFeature(action);
+				break;
+			case "modify":
+				toggleModifyFeature();
+				break;
+			case "delete":
+				toggleDeleteFeature();
+				break;
+			case "copy":
+				toggleCopyFeature();
+				break;
+			default:
+				this.turnEditingOff(); // reset
+		}
+	}
+	
+	/**
+	 * Function: updateLayerCounter
+	 * @param (int) layerCounter
+	 * @param (int) layerArraySize
+	 * @returns (int) new layer count
+	 * Function that updates the layerCounter and spinner when populating the editable layer dropdown
+	 */
+	updateLayerCounter(layerCounter, layerArraySize){
+		layerCounter++;
+		if(layerCounter == layerArraySize) {
+			app.plugins.LayerEditor.showLayerEditorWorking(false);
+			$("#le-editable-layer-select").prop("disabled", false);
+		} 
+		return layerCounter;
+	}
+
+	/**
+	 * Function: showLayerEditorWorking
+	 * @param (boolean) show
+	 * @returns () nothing
+	 * Function that hides/shows the LayerEditor spinner
+	 */
+	showLayerEditorWorking(show) {
+		if (show) {
+			app.plugins.LayerEditor.spinner = new Spinner(app.spinnerOptionsMedium).spin($(app.plugins.LayerEditor.tabContent)[0]);
+		} else {
+			if (app.plugins.LayerEditor.spinner) {
+				setTimeout(function(){
+					app.plugins.LayerEditor.spinner.stop();
+				}, 250);
+			}
+		}
+	}
+
+	/**
+	 * Function: populateEditableLayerSelect
+	 * @param () none
+	 * @returns () nothing
+	 * Function that populates the editable layer select control with layers configured to be editable
+	 */
+	populateEditableLayerSelect() {
+		// Empty the select control
+		$("#le-editable-layer-select").empty();
+
+		// Add default no editable layer option
+		$("#le-editable-layer-select").append(new Option("No Editable Layer", -1));
+
+		// Loop through the map layers
+		var layerId;
+		var typeName;
+		var layerCounter = 0
+		var layerArray = app.map.getLayers().getArray();
+		var layerArraySize = layerArray.length;
+
+		// Start the spinner
+		app.plugins.LayerEditor.showLayerEditorWorking(true);
+
+		// Disable the layer editor selection dropdown 
+		$("#le-editable-layer-select").prop("disabled", true);
+
+		// Loop throuh the layers and add them to the layer selector
+		$.each(layerArray, function (index, layer) {
+			// If the layer is editable
+			if (layer.get("editable")) {
+				// Get the layer ID
+				layerId = ol.util.getUid(layer);
+
+				// Get the layer name
+				app.config.map.layers.forEach( (l)=>{ 
+					if (l.get("title")==layer.get("title")) {
+						typeName = app.config.map.layers[0].getSource().layerNamespace+":"+app.config.map.layers[0].getSource().layerName
+					}
+				});	
+
+				// Now check if the user has permission to edit the layer
+				// by sending a GetFeatureWithLock request. Here we set count to 0
+				// to minimize the query speed.
+				const xmlString = `
+					<wfs:GetFeatureWithLock service='WFS' version='2.0.0' 
+						handle='GetFeatureWithLock-tc1' expiry='1' lockaction='SOME' maxFeatures='1' resultType='results' count='1'
+						xmlns:iss='http://th.gov.bc.ca/iss'
+						xmlns:fes='http://www.opengis.net/fes/2.0'
+						xmlns:wfs='http://www.opengis.net/wfs/2.0'>
+						<wfs:Query typeNames='${typeName}'/>
+					</wfs:GetFeatureWithLock>
+				`;
+				
+				$.ajax({
+					type: "POST",
+					contentType: "text/plain",
+					xhrFields: {
+						withCredentials: true
+					},
+					crossDomain: true,
+					url: layer.getSource().layerUrl,
+					data: xmlString,
+					async: true
+				}).done(function (response) {
+					// Add this layer as an editing option
+					$("#le-editable-layer-select").append(
+						new Option(layer.get("title"), layerId)
+					);
+
+					// Update the layer counter and stop the spinner if all layers have been checked
+					layerCounter = app.plugins.LayerEditor.updateLayerCounter(layerCounter, layerArraySize);
+
+				}).fail(function (data, settings, exception) {
+					// Create a log event message
+					logger(
+						"ERROR",
+						app.plugins.LayerEditor.name + ": User could not validate permissions for " + layer.get("title") + " - " + exception
+					);
+
+					// Update the layer counter and stop the spinner if all layers have been checked
+					layerCounter = app.plugins.LayerEditor.updateLayerCounter(layerCounter, layerArraySize);
+				});
+			} else {
+				// Update the layer counter and stop the spinner if all layers have been checked
+				layerCounter = app.plugins.LayerEditor.updateLayerCounter(layerCounter, layerArraySize);
+			}
+		});
+	}
+
+	/**
+	 * Function: setEditableLayer
+	 * @param (integer) layerId
+	 * @returns () nothing
+	 * Function that sets the editable layer based on user selection
+	 */
+	setEditableLayer(layerId) {
+		// Reset editable layer stuff
+		this.editableLayer = null;
+
+		// Unregister the click event for all edit buttons (if they exist)
+		$(".le-edit-btn").off("click");
+
+		// Set the editable layer according to the passed layerId
+		$.each(app.map.getLayers().getArray(), function (index, layer) {
+			if (ol.util.getUid(layer) == layerId) {
+				app.plugins.LayerEditor.editableLayer = layer;
+				
+				// Attach additionaly event handlers onto the editable layer
+				app.plugins.LayerEditor.editableLayer.getSource().on("featuresloadstart", function (e) {
+					if (app.plugins.LayerEditor) app.plugins.LayerEditor.editableLayer.set("isLoading", true);
+				});
+				app.plugins.LayerEditor.editableLayer.getSource().on("featuresloadend", function (e) {
+					if (app.plugins.LayerEditor) app.plugins.LayerEditor.editableLayer.set("isLoading", false);
+				});
+				app.plugins.LayerEditor.editableLayer.getSource().on("featuresloaderror", function (e) {
+					if (app.plugins.LayerEditor) app.plugins.LayerEditor.editableLayer.set("isLoading", false);
+				});
+			}
+		});
+
+		// If editable layer is null, then cleanup and bail
+		if (!app.plugins.LayerEditor.editableLayer) {
+			this.toggleEditControls(null);
+			return;
+		}
+
+		// Make sure the editable layer is visible
+		if (app.plugins.LayerEditor.editableLayer.getVisible() == false) {
+			this.editableLayer.setVisible(true);
+
+			// If layer controller plugin exists, then check on the layer there toolbar
+			if (app.plugins.LayerController) {
+				$(".lc-overlay-chkbox").each(function () {
+					if ($(this).attr("layerId") == layerId) {
+						$(this).prop("checked", true);
+						rememberState();
+					}
+				});
+			}
+		}
+
+		// Show the editing controls configured for this layer
+		if (app.plugins.LayerEditor.editableLayer.get("controls")) {
+			this.toggleEditControls(app.plugins.LayerEditor.editableLayer.get("controls"));
+		} else {
+			return;
+		}
+
+		// Register the click event for all edit buttons
+		$(".le-edit-btn").on("click", (e) => {
+			// Prompt to deal with unsaved feature changes if they exist
+			if(app.plugins.LayerEditor.checkForUnsavedChanges()) {
+				return;
+			}
+						
+			// Get the button and it's intended action
+			var btn;
+			if ($(e.target).is("img")) {
+				btn = $(e.target).parent();
+			} else {
+				btn = $(e.target);
+			}
+			var action = btn.data("action");
+
+			// If there is a copy event, turn it off
+			if (this.copy) {
+				app.map.un("pointerup", this.copy);
+			}
+
+			// 1. If already active turn off and turn default map click function back on.
+			// 2. Otherwise turn any other button off and turn the new button on.
+			// 3. Don't highlight the attribute button. ?????????
+			if (btn.hasClass("active")) {
+				btn.removeClass("active");
+				if (action === "snap") {
+					// If turning off snapping clear the snapping collection
+					this.snapableCollection.clear();
+				} else {
+					// Otherwise turn off all the buttons
+					this.toggleEditorFunction("reset");
+				}
+			} else {
+				if (action === "snap") {
+					// If turning on the snapping button fill snapping collection
+					// Fill the snapable array
+					this.snapable(e);
+				}
+				$(".le-edit-btn").not('[data-action="snap"]').removeClass("active");
+				if (action !== "attributes") btn.addClass("active");
+				this.toggleEditorFunction(action);
+			}
+		});
+
+	}
+
+	/**
+	 * Function: toggleEditControls
+	 * @param (object) controls
+	 * @returns () nothing
+	 * Function that hides or shows (toggles) the editing controls
+	 */
+	toggleEditControls(controls) {
+		// Turn editing off by default
+		this.turnEditingOff();
+
+		// Deactivate and hide all controls
+		$(".le-edit-btn").each(function () {
+			var btn = $(this);
+			if (btn.hasClass("active")) btn.removeClass("active");
+			btn.hide();
+		});
+
+		// Hide all control set group containers
+		$(".le-edit-btn-grp")
+			.removeClass("in")
+			.addClass("out")
+			.on("animationend", (e) => {
+			$(e.target).addClass("hidden");
+		});
+
+		// Bail if no controls were passed
+		if (!controls) return;
+
+		// Build the toolbar
+		var keys = Object.keys(controls);
+		keys.forEach((key) => {
+			var btn = $("div[data-action='" + key + "']");
+			if (controls[key]) {
+				btn.show();
+				if (btn.parent().hasClass("out")) {
+					btn.parent().removeClass("out").addClass("in")
+					.on("animationend", (e) => {
+						$(e.target).removeClass("hidden");
+					});
+				}
+			} else {
+				btn.hide();
+			}
+		});
+	}
+
+	/**
+	 * Function: snapable
+	 * If the snapping tool is on, clear out the snapable features collection
+	 * and repopulate according to what layers are visible.
+	 * @param {*} e Zoom or button click event. The button click is fired
+	 * 		when snapping is turned on. The zoom event happens on map move
+	 * 		when snapping is turned on.
+	 */
+	snapable(e) {
+		const active = $(
+			'#le-digitize-toolbar .le-edit-btn[data-action="snap"]'
+		).hasClass("active");
+
+		// If turning on snapping button
+		const snapClick = e.type === "click";
+
+		if (!active && !snapClick) return; // Exit if tool isn't on
+
+		// Clear the snapable collection
+		app.plugins.LayerEditor.snapableCollection.clear();
+
+		// Add the editiable layer features to the snapable collection
+		app.plugins.LayerEditor.editableLayer
+			.getSource()
+			.getFeatures()
+			.forEach((f) => {
+				app.plugins.LayerEditor.snapableCollection.push(f);
+			});
+
+		// Loop thru each map layer
+		app.map.getLayers().forEach((layer) => {
+			// Bail if not an acceptable visible overlay layer
+			if (layer.get("type") != "overlay" || layer.get("visible") !== true || typeof layer.getSource().getFeatureInfoUrl != "function") return;
+
+			// Define the layer url
+			var layerUrl;
+			if (layer.getSource() instanceof ol.source.TileWMS) {
+				layerUrl = layer.getSource().getUrls()[0]; // TileWMS
+			} else if (layer.getSource() instanceof ol.source.ImageWMS) {
+				layerUrl = layer.getSource().getUrl(); // ImageWMS
+			}
+			layerUrl = layerUrl.replace(new RegExp("/ows", "ig"), "/wfs");
+			layerUrl = layerUrl.replace(new RegExp("/wms", "ig"), "/wfs");
+
+			// Get the typeName (layers) which will often be a combo of namespace and layer name (i.e. hwy:DSA_CONTRACT_AREA)
+			var typeName = layer.getSource().getParams().LAYERS;
+
+			// Define the request BBOX (from the current extent)
+			const proj = app.map.getView().getProjection();
+			const extent = app.map.getView().calculateExtent(app.map.getSize());
+			const [x1, y1, x2, y2] = extent;
+			const [lon1, lat1] = ol.proj.transform([x1, y1], proj, "EPSG:4326");
+			const [lon2, lat2] = ol.proj.transform([x2, y2], proj, "EPSG:4326");
+			const coords = `${lon1},${lat1},${lon2},${lat2}`;
+
+			// Issue the GetFeature request
+			$.ajax({
+				type: "GET",
+				url: layerUrl,
+				timeout: 10000,
+				dataType: "json",
+				data: {
+					service: "WFS",
+					version: "1.1.0",
+					request: "GetFeature",
+					typeNames: typeName,
+					outputFormat: "application/json",
+					maxFeatures: 1000,
+					srsName: app.map.getView().getProjection().getCode(),
+					bbox: coords + ",EPSG:4326",
+				},
+				xhrFields: {
+					withCredentials: layer.get("withCredentials") ? layer.get("withCredentials") : false
+				},
+			})
+			.done(function (response) {
+				// Add the response (features) to the snapable collection
+				var features = new ol.format.GeoJSON().readFeatures(response);
+				features.forEach((feature) => {
+					app.plugins.LayerEditor.snapableCollection.push(feature);
+				});
+			})
+			.fail(function (jqxhr, settings, exception) {
+				logger(
+					"ERROR",
+					app.plugins.LayerEditor.name + ": Could not get features from " + layer.get("title") + " for snapping - " + exception
+				);
+			});
+		});
+	}
+
+	/**
+	 * Function: manageControls
+	 * @param {Object} e OpenLayers zoom event
+	 * @returns () nothing
+	 * Some controls are only active a certain zoom levels.
+	 * This function gets called after each movement of the map and
+	 * toggle applicable controls.
+	 */
+	manageControls(e) {
+		const zoom = app.map.getView().getZoom();
+		if (zoom > 9) {
+			$('#le-digitize-toolbar .le-edit-btn[data-action="snap"]').removeClass("disabled");
+			app.plugins.LayerEditor.snapable(e);
+		} else {
+			$('#le-digitize-toolbar .le-edit-btn[data-action="snap"]').addClass("disabled");
+		}
+	}
+
+	/**
+	 * Function: highlightFeatureOnHover
+	 * @param (object) event
+	 * @returns () nothing
+	 * Function to highlight a 'hovered feature in red
+	 */
+	highlightFeatureOnHover(e) {
+		app.plugins.LayerEditor.redHighlightLayer.getSource().clear();
+		app.map.forEachFeatureAtPixel(e.pixel, function (feature) {
+			app.plugins.LayerEditor.redHighlightLayer.getSource().addFeature(feature);
+		});
+	}
+
+	/**
+	 * Function: refreshEditableLayer
+	 * @param () none
+	 * @returns () nothing
+	 * Function to refresh the editable layer.
+	 */
+	refreshEditableLayer() {
+		resetLayerStatistics(app.plugins.LayerEditor.editableLayer);
+		app.plugins.LayerEditor.editableLayer.getSource().refresh();
+	}
+
+	/**
+	* Function: addPlugin
+	* @param () none
+	* @returns () nothing
+	* Function that adds the plugin tab to the sidebar
+	*/
+	addPlugin() {
+		// Define Callback
+		var callback = function (success, tabNav, tabContent) {
+		
+			// Bail if failed
+			if (!success) {
+				logger("ERROR", app.plugins.LayerEditor.name + ": Plugin failed to initialize");
+				return;
+			}
+
+			// Set class variables
+			app.plugins.LayerEditor.tabNav = tabNav;
+			app.plugins.LayerEditor.tabContent = tabContent;
+
+			// Populate the editable layer select
+			app.plugins.LayerEditor.populateEditableLayerSelect();
+
+			// Register the editable layer event handlers
+			$("#le-editable-layer-select").on("change", function (e) {
+				var selectedLayerId = $("#le-editable-layer-select option:selected").val();
+				app.plugins.LayerEditor.setEditableLayer(selectedLayerId);
+			});
+			$("#le-editable-layer-select").on("keydown mousedown touchstart", function(e) {
+				// Prompt to deal with unsaved feature changes if they exist
+				if(app.plugins.LayerEditor.checkForUnsavedChanges()) {
+					e.preventDefault();
+					e.stopPropagation();
+				}
+			});
+			
+			// Register the editable feature event handlers
+			$("#le-editable-feature-select").on("change", function (e) {
+				var featureId = $("#le-editable-feature-select option:selected").val();
+				app.plugins.LayerEditor.showFeatureEditor(featureId);
+			});
+			$("#le-editable-feature-select").on("keydown mousedown touchstart", function(e) {
+				// Prompt to deal with unsaved feature changes if they exist
+				if(app.plugins.LayerEditor.checkForUnsavedChanges()) {
+					e.preventDefault();
+					e.stopPropagation();
+				}
+			});
+						
+			// Copy the save/discard changes buttons to the content window
+			$("#le-save-discard-changes-btn-container").appendTo("body");
+			
+			// Register the save changes btn handler
+			$("#le-save-changes-btn").on("click", function(e) {
+				app.plugins.LayerEditor.saveFeature();
+			});
+			
+			// Register the discard changes btn handler
+			$("#le-discard-changes-btn").on("click", function(e) {
+				app.plugins.LayerEditor.editableFeature.setGeometry(app.plugins.LayerEditor.editableFeatureOriginalGeometry);
+				app.plugins.LayerEditor.showFeatureEditor(app.plugins.LayerEditor.editableFeature.getId());
+			});
+			
+			// Copy the editing toolbar to the map viewport
+			$("#le-digitize-toolbar").appendTo("#map .ol-viewport .ol-overlaycontainer-stopevent");
+			
+			// Listen to zoom event to toggle certain tools
+			app.map.on("moveend", app.plugins.LayerEditor.manageControls);
+
+			// Log success
+			logger("INFO", app.plugins.LayerEditor.name + ": Plugin successfully loaded");
+		};
+
+		// Add the tab
+		addSideBarTab(this.tabName, this.tabContentFile, callback);
+	}
+}

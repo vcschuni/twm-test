@@ -1,0 +1,68 @@
+<style>
+	.ci2p-feature-table {
+		font-size: 0.70rem;
+		margin-bottom: 2px;
+	}
+	.ci2p-feature-table tbody {
+		margin-left: 3px;
+		padding-right: 3px;
+		display: block;
+		overflow-y: auto;
+	}
+	.ci2p-feature-table tbody td {
+		border-top: 0px;
+	}
+	.ci2p-feature-buttons {
+		display: table-cell;
+		white-space: nowrap;
+		vertical-align: middle;
+	}
+	.ci2p-feature-title {
+		padding-left: 5px;
+		padding-right: 15px;
+		display: table-cell;
+		vertical-align: middle;
+	}
+	.ci2p-feature-field-name {
+		white-space: nowrap;
+		width: 40px;
+		text-align: right;
+	}
+	#ci2p-paging {
+		text-align: center;
+		font-size: 0.75rem;
+	}
+	#ci2p-paging-text {
+		font-size: 0.8rem;
+		font-weight: bold;
+		margin-right: 5px;
+		margin-left: 5px;
+	}
+	.ci2p-page-left:hover {
+		color: #808080;
+	}
+	.ci2p-page-right:hover {
+		color: #808080;
+	}
+</style>
+
+<!-- Feature Template (Hidden) [table-striped] -->
+<table class="table table-sm ci2p-feature-table">
+	<thead class="thead-dark">
+		<tr>
+			<th scope="col" colspan="2">
+				<div class="ci2p-feature-buttons">
+					<button type="button" class="btn btn-secondary btn-sm Identify2PopupNavigateTo" style="display:none;">
+						<span class="oi oi-location" title="Navigate to"></span>
+					</button>
+				</div>
+				<div class="ci2p-feature-title">
+					<!-- Feature title inserted here -->
+				</div>
+			</th>
+		</tr>
+	</thead>
+	<tbody>
+			<!-- Feature detail inserted here -->
+	</tbody>
+</table>

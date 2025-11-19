@@ -1,0 +1,6 @@
+{
+	name: "CRTreporter",				// Plugin Class Name - DO NOT MODIFY [required]
+	tabName: "CaRT Reporter",			// Tab name [required]
+	chartLayerName: "CRTData",				// This layer is filtered and used in charts [required]
+	enabled: true						// Whether plugin is enabled [required]
+}

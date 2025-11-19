@@ -1,0 +1,125 @@
+{
+	name: "LayerEditor",			// Plugin Class Name - DO NOT MODIFY [required]
+	tabName: "Editor",				// Tab name [required]
+	enabled: true,					// Whether plugin is enabled [required]
+}
+
+
+// This is how a typical edit layer is configured:
+
+new ol.layer.Vector({
+	title: "ISS Features",
+	type: "overlay",
+	visible: true,
+	editable: true,					// Allows layer to be editable [required]
+	controls: {
+		point: true,				// Shows the add point tool and allows points to be added [required]
+		linestring: true,			// Shows the add line tool and allows lines to be added [required]
+		polygon: true,				// Shows the add polygon tool and allows polygons to be added [required]
+		modify: true,				// Shows the modify tool and allows features to be modified (geometry and/or attributes) [required]
+		delete: true				// Shows the delete tool and allows features to be deleted [required]
+	},
+	allowedModifications: {			// Configures how the modify tool works [required]
+		geometry: true,				// Allows feature geometry to be modified [required]
+		attributes: true			// Allows feature attributes to be modified [required]
+	},
+	attributeTransforms: { 			// Allows attributes to be mapped (targetfield: "sourcefield")
+		NAME: "CONTRACT_AREA_NAME",
+		DESCRIPTION: "CONTRACT_AREA_NUMBER"
+	},
+	source: new ol.source.Vector({
+		format: new ol.format.GeoJSON({extractGeometryName: true}),
+		loader: function(extent, resolution, projection) {
+			// Get the vector source and remove any exisitng features
+			var vectorSource = this;
+			vectorSource.clear();
+			
+			// Set layer source namespace, name, url, and geometry column name [ALL REQUIRED BY EDITING PLUGIN]
+			vectorSource.layerNamespace = "iss";
+			vectorSource.layerName = "ISS_FEATURES";
+			vectorSource.layerUrl = "../path-to-geoserver/wfs";
+			vectorSource.geometryColumnName = "GEOMETRY";
+			
+			// Build the URL
+			var params = {
+				service: "WFS",
+				version: "1.1.1",
+				request: "GetFeature",
+				typeName: vectorSource.layerNamespace+":"+vectorSource.layerName,
+				outputFormat: "application/json",
+				srsName: app.map.getView().getProjection().getCode()
+			}
+			var url = vectorSource.layerUrl+"?"+$.param(params);
+			
+			// Issue and handle the feature request
+			$.ajax({
+				url: url,
+				type:"GET",
+				dataType: "json"
+			}).done(function(response) {
+				var features = vectorSource.getFormat().readFeatures(response, {
+					featureProjection: projection
+				});
+				vectorSource.addFeatures(features);
+			}).fail(function(jqxhr, settings, exception) {
+				logger("ERROR", "Error loading " + vectorSource.layerName);
+			});
+		}					
+	}),
+	style: new ol.style.Style({
+		fill: new ol.style.Fill({
+			color: 'rgba(255, 255, 255, 0.3)'
+		}),
+		stroke: new ol.style.Stroke({
+			color: '#38afff',
+			width: 2
+		}),
+		image: new ol.style.Circle({
+			radius: 7,
+			stroke: new ol.style.Stroke({
+				color: 'white',
+				width: 2
+			}),
+			fill: new ol.style.Fill({
+				color: '#38afff'
+			})
+		})
+	}),
+	fields: [
+		{
+			name: "FEATURE_ID",
+			nameTransform: function() { return "Feature ID"; }
+		},
+		{
+			name: "NAME",
+			searchable: true,
+			title: true,
+			nameTransform: function() { return "Name"; },
+			editable: true
+		},
+		{
+			name: "DESCRIPTION",
+			searchable: true,
+			nameTransform: function() { return "Description"; },
+			editable: true,														// Makes field editable (defaults to false)
+			controlType: "html-input"											// Control type (defaults to simple inputs based on datatype)
+		},																		// One of: html-input, textarea-input, text-input, number-input, date-time-input, none				
+		{
+			name: "FEATURE_TYPE",
+			searchable: true,
+			nameTransform: function() { return "Type"; },
+			editable: true,														// Makes field editable (defaults to false)
+			valueOptions: ["Cat","Dog","Squirrel","Mouse","Rat","Cow"]			// Restricts field to an option list (overrides controlType)
+		},
+		{
+			name: "CREATED_TIMESTAMP",
+			nameTransform: function() { return "Created"; },
+			editable: true,
+			controlType: "no-input"
+		},
+		{
+			name: "UPDATED_TIMESTAMP",
+			nameTransform: function() { return "Updated"; }
+		}
+	]
+})

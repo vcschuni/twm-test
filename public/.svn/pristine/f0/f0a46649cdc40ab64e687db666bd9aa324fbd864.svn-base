@@ -1,0 +1,35 @@
+{
+	"applications": [
+		{
+			"name": "Transportation Web Map (Generic)",
+			"config": "default",
+			"advertised": true,
+			"test": true
+		},
+		{
+			"name": "Vehicle Inspection Program",
+			"config": "vip",
+			"advertised": true,
+			"test": true
+		},
+		{
+			"name": "Height Clearance Tool",
+			"config": "hct",
+			"advertised": true,
+			"test": true
+		},
+		{
+			"name": "Development Services Area Offices",
+			"config": "DAGoffices",
+			"advertised": true,
+			"test": true
+		},
+		{
+			"name": "Traffic Data Program",
+			"config": "tdp",
+			"advertised": true,
+			"test": true
+		}
+
+	]
+}
