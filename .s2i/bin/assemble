@@ -7,4 +7,5 @@ if [ -f composer.json ]; then
 fi
 
 echo "Copying application source..."
+mkdir -p /opt/app-root/src
 cp -Rf . /opt/app-root/src
